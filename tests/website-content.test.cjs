@@ -1980,3 +1980,45 @@ test('setup waits for a status that names the node instead of opening over a slo
   assert.match(html, /@click="startupDismissed = true">Continue without the node/);
   assert.match(html, /Waiting for your node/);
 });
+
+test('a node that never answers fails the refresh instead of holding the startup screen', async () => {
+  const { app, messages } = nodeApp({
+    AbortController,
+    setTimeout: (callback) => { queueMicrotask(callback); return 1; },
+    fetch: (_path, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    }),
+    console: { error: () => {} },
+  });
+  app.startupDismissed = false;
+  await app.refresh();
+  assert.equal(app.pollFailures, 1);
+  assert.match(messages.at(-1).message, /\/api\/status did not answer within 20 seconds/);
+  const init = content('www/assets/iuna-ui.js').match(/async init\(\) \{[\s\S]*?\n    \},/)[0];
+  assert.ok(init.indexOf('this.schedulePoll();') < init.indexOf('await this.quoteTicket(true);'),
+    'a hanging ticket quote does not delay polling or the startup screen buttons');
+});
+
+test('a refresh asked for mid-flight runs once afterwards instead of alongside', async () => {
+  let active = 0;
+  let overlapped = false;
+  let statusCalls = 0;
+  const { app } = nodeApp({
+    fetch: async (path) => {
+      active += 1;
+      if (active > 5) overlapped = true;
+      if (path === '/api/status') statusCalls += 1;
+      await new Promise((resolve) => setImmediate(resolve));
+      active -= 1;
+      const body = path === '/api/status' ? { network: 'iuna-mainnet-candidate' } : path === '/api/mempool' ? { ledger_transactions: [], mining_tickets: [] } : [];
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+    },
+  });
+  const first = app.refresh(true);
+  const second = app.refresh(true);
+  const third = app.refresh(true);
+  assert.equal(second, third, 'requests during one refresh share the follow-up');
+  await Promise.all([first, second, third]);
+  assert.equal(overlapped, false);
+  assert.equal(statusCalls, 2);
+});

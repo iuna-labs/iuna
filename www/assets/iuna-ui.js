@@ -2,8 +2,11 @@ const IUNA_DOWNLOADS_URL = "https://getiuna.org/downloads/";
 const IUNA_RELEASE_METADATA_URL = "https://getiuna.org/downloads/latest.json";
 const IUNA_RELEASE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const IUNA_CHART_MAX_POINTS = 300;
+// A node GET that has not answered by then is treated as failed.
+const IUNA_REQUEST_TIMEOUT_MS = 20_000;
 const iunaChartCaches = new WeakMap();
 const iunaMetricsRequests = new WeakMap();
+const iunaRefreshRequests = new WeakMap();
 // The node names the parts a reward collects; a note explains a block-wide amount.
 const IUNA_REWARD_INPUTS = {
   ledger_fee_share: { label: "Ledger fee share", note: "Share of this block's Ledger transaction fees." },
@@ -152,9 +155,8 @@ window.iunaApp = function iunaApp() {
         if (!document.hidden) this.refresh(true).then(() => this.schedulePoll());
       });
       await this.refresh();
-      this.checkLatestRelease();
-      this.scheduleReleaseCheck();
-      await this.quoteTicket(true);
+      // Polling and setup start before the ticket quote: a quote that hangs on a busy node must
+      // not keep the startup screen without its Retry and Continue buttons.
       this.initialized = true;
       this.prepareSetup();
       this.schedulePoll();
@@ -169,6 +171,9 @@ window.iunaApp = function iunaApp() {
       });
       if (this.showSetup) this.$nextTick(() => this.$refs.setupModal?.focus());
       if (this.showLogin) this.$nextTick(() => this.$refs.loginPassword?.focus());
+      this.checkLatestRelease();
+      this.scheduleReleaseCheck();
+      await this.quoteTicket(true);
     },
 
     captureDesktopToken() {
@@ -678,7 +683,27 @@ window.iunaApp = function iunaApp() {
       return 0;
     },
 
-    async refresh(silent = false) {
+    // Refreshes never overlap: a Retry or a returning tab used to start a second one, and whichever
+    // finished last overwrote the other's newer state. A refresh asked for while one runs is run
+    // once more afterwards, so a caller that just changed something still sees its result.
+    refresh(silent = false) {
+      let state = iunaRefreshRequests.get(this);
+      if (!state) iunaRefreshRequests.set(this, (state = { running: null, again: null, silent: true }));
+      if (!state.running) {
+        state.running = this.runRefresh(silent).finally(() => { state.running = null; });
+        return state.running;
+      }
+      state.silent = state.silent && silent;
+      state.again ||= state.running.then(() => {
+        const quiet = state.silent;
+        state.again = null;
+        state.silent = true;
+        return this.refresh(quiet);
+      });
+      return state.again;
+    },
+
+    async runRefresh(silent) {
       let failures = [];
       try {
         const previousHeartbeatHead = this.heartbeats[0]?.block_hash;
@@ -688,14 +713,16 @@ window.iunaApp = function iunaApp() {
         // Each response is applied on its own: one bad response used to abort the whole refresh,
         // which left the chain and peer lists empty while the status above them stayed current.
         const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-        const [statusResult, heartbeatsResult, peersResult, mempoolResult] = await Promise.allSettled([
+        // Peer targets load alongside: waiting for them afterwards doubled a timed-out refresh.
+        const [statusResult, heartbeatsResult, peersResult, mempoolResult, peerTargetsResult] = await Promise.allSettled([
           this.getCheckedJson("/api/status", isObject),
           this.getCheckedJson(`/api/heartbeats?limit=${this.heartbeatPage.limit}`, Array.isArray),
           this.getCheckedJson("/api/peers", Array.isArray),
           this.getCheckedJson("/api/mempool", isObject),
+          this.getCheckedJson("/api/peer-targets", Array.isArray),
         ]);
         // A failed secondary list is reported but does not slow polling; only the status does.
-        failures = [statusResult, heartbeatsResult, peersResult, mempoolResult]
+        failures = [statusResult, heartbeatsResult, peersResult, mempoolResult, peerTargetsResult]
           .filter((result) => result.status === "rejected")
           .map((result) => result.reason);
         if (peersResult.status === "fulfilled") {
@@ -716,10 +743,7 @@ window.iunaApp = function iunaApp() {
           this.heartbeatPage.hasMore = this.heartbeats.at(-1)?.height > 0
             && heartbeats.length === this.heartbeatPage.limit;
         }
-        this.peerTargets = await this.getCheckedJson("/api/peer-targets", Array.isArray).catch((error) => {
-          failures.push(error);
-          return this.peerTargets;
-        });
+        if (peerTargetsResult.status === "fulfilled") this.peerTargets = peerTargetsResult.value;
         if (statusResult.status === "rejected") {
           failures = failures.filter((error) => error !== statusResult.reason);
           throw statusResult.reason;
@@ -805,9 +829,36 @@ window.iunaApp = function iunaApp() {
       }
     },
 
+    // GETs give up after IUNA_REQUEST_TIMEOUT_MS. A node that accepts the connection but does not
+    // answer, for example while it holds its chain lock, otherwise held the poll loop, and with it
+    // the startup screen, until the page was reloaded. A caller's signal can still abort earlier.
+    async readResponse(path, callerSignal) {
+      const controller = typeof AbortController === "function" ? new AbortController() : null;
+      let timedOut = false;
+      const timer = controller
+        ? setTimeout(() => { timedOut = true; controller.abort(); }, IUNA_REQUEST_TIMEOUT_MS)
+        : null;
+      if (controller && callerSignal) {
+        if (callerSignal.aborted) controller.abort();
+        else callerSignal.addEventListener("abort", () => controller.abort(), { once: true });
+      }
+      const signal = controller?.signal || callerSignal;
+      try {
+        const response = await fetch(path, { headers: this.headers(), cache: "no-store", signal });
+        return { response, text: await response.text() };
+      } catch (error) {
+        if (timedOut) {
+          throw new Error(`${path} did not answer within ${IUNA_REQUEST_TIMEOUT_MS / 1000} seconds`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+
     async getJson(path, signal) {
-      const response = await fetch(path, { headers: this.headers(), cache: "no-store", signal });
-      const payload = await this.responseJson(response);
+      const { response, text } = await this.readResponse(path, signal);
+      const payload = this.parseResponseText(text);
       if (!response.ok) {
         const error = new Error(payload.error || `${path} returned ${response.status}`);
         error.status = response.status;
@@ -817,10 +868,9 @@ window.iunaApp = function iunaApp() {
     },
 
     // Like getJson, but rejects a successful response whose body has the wrong shape, and logs
-    // what arrived: an empty or non-JSON body still parses to an object in responseJson.
+    // what arrived: an empty or non-JSON body still parses to an object in getJson.
     async getCheckedJson(path, valid) {
-      const response = await fetch(path, { headers: this.headers(), cache: "no-store" });
-      const text = await response.text();
+      const { response, text } = await this.readResponse(path);
       let payload;
       try { payload = text ? JSON.parse(text) : undefined; } catch { payload = undefined; }
       if (!response.ok) {
@@ -878,7 +928,10 @@ window.iunaApp = function iunaApp() {
     },
 
     async responseJson(response) {
-      const text = await response.text();
+      return this.parseResponseText(await response.text());
+    },
+
+    parseResponseText(text) {
       if (!text) return {};
       try { return JSON.parse(text); } catch { return { error: text }; }
     },
