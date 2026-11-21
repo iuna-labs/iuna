@@ -103,6 +103,8 @@ window.iunaApp = function iunaApp() {
     showLogin: false,
     setupStep: 1,
     setupReady: false,
+    // Set once init finished its first refresh; later refreshes may then complete setup's start.
+    initialized: false,
     lastUpdated: null,
     pollTimer: null,
     releaseCheckTimer: null,
@@ -151,9 +153,8 @@ window.iunaApp = function iunaApp() {
       this.checkLatestRelease();
       this.scheduleReleaseCheck();
       await this.quoteTicket(true);
-      this.setupReady = true;
-      this.showSetup = !this.setupCompleted();
-      this.syncLoginVisibility();
+      this.initialized = true;
+      this.prepareSetup();
       this.schedulePoll();
       this.$watch("showSetup", (open) => {
         if (open) this.$nextTick(() => this.$refs.setupModal?.focus());
@@ -286,6 +287,15 @@ window.iunaApp = function iunaApp() {
         metrics: "Metrics",
         settings: "Settings",
       }[tab] || "iuna";
+    },
+
+    // Setup and login wait for a status that names this node. A slow or still-starting node can
+    // fail its first status request, and deciding then opened Initial Setup over an existing wallet.
+    prepareSetup() {
+      if (this.setupReady || !/^[0-9a-f]{32}$/.test(String(this.status.node_instance_id || ""))) return;
+      this.setupReady = true;
+      this.showSetup = !this.setupCompleted();
+      this.syncLoginVisibility();
     },
 
     setupCompleted() {
@@ -748,6 +758,7 @@ window.iunaApp = function iunaApp() {
         for (const error of failures) console.error("refresh failed", error);
         if (failures.length && !silent) this.notify(failures.map((error) => error.message).join("; "), "error");
         if (this.setupReady) this.syncLoginVisibility();
+        else if (this.initialized) this.prepareSetup();
       }
     },
 

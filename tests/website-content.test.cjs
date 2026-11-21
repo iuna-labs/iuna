@@ -1944,3 +1944,30 @@ test('a failing peer list reads as unavailable, not as loading or isolation', as
   assert.equal(app.networkLabel(), 'Unavailable');
   assert.equal(app.dashboardState('p2p'), 'warn');
 });
+
+test('setup waits for a status that names the node instead of opening over a slow start', async () => {
+  let statusUp = false;
+  const instance = 'ab'.repeat(16);
+  const { app, values } = nodeApp({
+    fetch: async (path) => {
+      if (path === '/api/status' && !statusUp) return { ok: false, status: 503, text: async () => 'starting' };
+      const body = path === '/api/status'
+        ? { network: 'iuna-mainnet-candidate', node_instance_id: instance, wallet_exists: true, wallet_unlocked: true }
+        : path === '/api/mempool' ? { ledger_transactions: [], mining_tickets: [] } : [];
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+    },
+    console: { error: () => {} },
+  });
+  values.set(`iunaSetupComplete:${instance}`, 'true');
+  app.initialized = true;
+  await app.refresh(true);
+  assert.equal(app.setupReady, false, 'no status yet: neither setup nor login decides');
+  assert.equal(app.showSetup, false);
+  statusUp = true;
+  await app.refresh(true);
+  assert.equal(app.setupReady, true);
+  assert.equal(app.showSetup, false, 'a node that finished setup before does not reopen it');
+  const html = content('www/node.html');
+  assert.match(html, /class="setup-overlay login-overlay" x-show="!setupReady"/);
+  assert.match(html, /Waiting for your node/);
+});
