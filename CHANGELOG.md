@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.24] - 2026-11-21
+
+### Fixed
+
+- stop a silent node from holding the poll loop and startup screen
+
 ## [0.6.23] - 2026-11-21
 
 ### Fixed
