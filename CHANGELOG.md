@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.22] - 2026-11-21
+
+### Fixed
+
+- keep the chain and peers visible when one refresh response fails
+
 ## [0.6.21] - 2026-11-21
 
 ### Fixed
