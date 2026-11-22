@@ -735,12 +735,12 @@ window.iunaApp = function iunaApp() {
         if (mempoolResult.status === "fulfilled") this.mempool = mempoolResult.value;
         const heartbeats = heartbeatsResult.status === "fulfilled" ? heartbeatsResult.value : null;
         if (heartbeats) {
-          const oldestFreshHeight = heartbeats.at(-1)?.height;
+          const oldestFreshHeight = heartbeats[heartbeats.length - 1]?.height;
           const olderLoaded = oldestFreshHeight == null
             ? []
             : this.heartbeats.filter((block) => Number(block.height) < Number(oldestFreshHeight));
           this.heartbeats = [...heartbeats, ...olderLoaded];
-          this.heartbeatPage.hasMore = this.heartbeats.at(-1)?.height > 0
+          this.heartbeatPage.hasMore = this.heartbeats[this.heartbeats.length - 1]?.height > 0
             && heartbeats.length === this.heartbeatPage.limit;
         }
         if (peerTargetsResult.status === "fulfilled") this.peerTargets = peerTargetsResult.value;
@@ -1355,7 +1355,7 @@ window.iunaApp = function iunaApp() {
       const previousLedgerCount = this.ledgerBlocks.length;
       try {
         do {
-          const beforeHeight = Number(this.heartbeats.at(-1)?.height);
+          const beforeHeight = Number(this.heartbeats[this.heartbeats.length - 1]?.height);
           if (!Number.isFinite(beforeHeight) || beforeHeight <= 0) {
             this.heartbeatPage.hasMore = false;
             break;
@@ -1366,7 +1366,7 @@ window.iunaApp = function iunaApp() {
           // Merged, not pushed: a window load may have replaced the list while this page loaded.
           this.mergeHeartbeats(older);
           this.heartbeatPage.hasMore = page.length === this.heartbeatPage.limit
-            && Number(page.at(-1)?.height) > 0;
+            && Number(page[page.length - 1]?.height) > 0;
           if (!page.length || !older.length) this.heartbeatPage.hasMore = false;
         } while (chain === "ledger"
           && this.ledgerBlocks.length === previousLedgerCount
@@ -2083,7 +2083,7 @@ window.iunaApp = function iunaApp() {
       const byHeight = new Map(this.heartbeats.map((item) => [Number(item.height), item]));
       for (const row of rows) byHeight.set(Number(row.height), row);
       this.heartbeats = [...byHeight.values()].sort((left, right) => Number(right.height) - Number(left.height));
-      this.heartbeatPage.hasMore = Number(this.heartbeats.at(-1)?.height) > 0;
+      this.heartbeatPage.hasMore = Number(this.heartbeats[this.heartbeats.length - 1]?.height) > 0;
       this.syncLedgerBlocks();
     },
 

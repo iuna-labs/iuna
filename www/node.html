@@ -625,7 +625,7 @@
               <button type="button" tabindex="-1" class="pulse-bar" :class="{ledger: block.has_ledger_block, mine: minedByWallet(block)}" :title="pulseTitle(block)" @click="openPulseBlock(block)"></button>
             </template>
           </div>
-          <div class="pulse-axis"><span x-text="`#${heartbeats[0]?.height ?? 0} · ${blockAgeLabel(heartbeats[0], 'Genesis')}`"></span><span class="pulse-legend"><span>Heartbeat</span><span class="ledger">Ledger block</span><span class="mine" x-show="status.wallet_public_key">Mined by you</span></span><span x-text="`#${dashboardHeartbeats().at(-1)?.height ?? 0}`"></span></div>
+          <div class="pulse-axis"><span x-text="`#${heartbeats[0]?.height ?? 0} · ${blockAgeLabel(heartbeats[0], 'Genesis')}`"></span><span class="pulse-legend"><span>Heartbeat</span><span class="ledger">Ledger block</span><span class="mine" x-show="status.wallet_public_key">Mined by you</span></span><span x-text="`#${dashboardHeartbeats()[dashboardHeartbeats().length - 1]?.height ?? 0}`"></span></div>
         </div>
         <div class="status-tiles">
           <button type="button" class="status-tile" :class="dashboardState('heartbeat')" @click="setTab('chain'); setChainView('heartbeat')"><span class="status-tile-label"><span class="state-dot" aria-hidden="true"></span>Heartbeat chain</span><span class="status-tile-value" x-text="`#${status.heartbeat_height ?? 0}`"></span><span class="status-tile-sub" x-text="heartbeatAgeLabel()"></span></button>

@@ -283,6 +283,11 @@ test('node UI preserves the product screens while using the canonical protocol',
   assert.doesNotMatch(combined, /VDF|quantum|proof[- ]of[- ]burn|PoB|devnet-v2|protocol-v2/i);
 });
 
+test('node UI avoids Array.prototype.at for older QtWebEngine browsers', () => {
+  const browserCode = [content('www/assets/iuna-ui.js'), content('www/node.html')].join('\n');
+  assert.doesNotMatch(browserCode, /\.at\s*\(/);
+});
+
 test('mining explains and meters both kinds of mining power', () => {
   const { app } = nodeApp();
   app.status = { ledger_ticket_power: 25_000_000 };

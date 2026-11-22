@@ -852,6 +852,28 @@ async fn run_connection(
                     }
                     _ => {}
                 }
+                // Range validation and SQLite persistence are synchronous. Import one block per
+                // lock turn so status requests and the screen-data projector can run throughout a
+                // fresh sync, and tell Tokio that the work may block its current worker thread.
+                // Keep only the final range response: every singleton import asks for the next
+                // range while the remote Hello still says this node is behind.
+                if let Envelope::Blocks { blocks } = envelope {
+                    let (responses, gossip) = import_block_range(
+                        &node,
+                        &mut session,
+                        blocks,
+                        &peers,
+                        &peer_key,
+                    )
+                    .await?;
+                    for response in responses {
+                        write_envelope(&mut writer, &response).await?;
+                    }
+                    for envelope in gossip {
+                        let _ = relay_outbound.send(envelope);
+                    }
+                    continue;
+                }
                 let (responses, gossip) = {
                     let mut node = node.lock().await;
                     let before_tip = node.status().tip;
@@ -881,11 +903,7 @@ async fn run_connection(
                             .collect::<std::collections::BTreeMap<_, _>>(),
                         _ => std::collections::BTreeMap::new(),
                     };
-                    let batch = matches!(envelope, Envelope::Blocks { .. });
                     let responses = session.handle(&mut node, envelope, unix_time_secs())?;
-                    if batch {
-                        peers.update_syncing(&peer_key, session.is_syncing());
-                    }
                     let mut gossip = Vec::new();
                     let after_tip = node.status().tip;
                     if after_tip != before_tip {
@@ -928,6 +946,73 @@ async fn run_connection(
             }
             () = tokio::time::sleep_until(read_deadline) => bail!("peer timed out"),
         }
+    }
+}
+
+async fn import_block_range(
+    node: &SharedConsensusNode,
+    session: &mut PeerSession,
+    blocks: Vec<HeartbeatBlock>,
+    peers: &PeerRegistry,
+    peer_key: &str,
+) -> Result<(Vec<Envelope>, Vec<Envelope>)> {
+    let mut responses = Vec::new();
+    let mut first_tip = None;
+    let mut final_tip = None;
+    let mut blocks = blocks.into_iter().peekable();
+
+    // An empty range still ends a side-branch walk and must reach PeerSession.
+    if blocks.peek().is_none() {
+        let mut locked = node.lock().await;
+        let tip = locked.status().tip;
+        responses = handle_blocking_peer_envelope(
+            session,
+            &mut locked,
+            Envelope::Blocks { blocks: Vec::new() },
+        )?;
+        first_tip = Some(tip);
+        final_tip = Some(locked.status().tip);
+    }
+
+    for block in blocks {
+        let mut locked = node.lock().await;
+        first_tip.get_or_insert_with(|| locked.status().tip);
+        responses = handle_blocking_peer_envelope(
+            session,
+            &mut locked,
+            Envelope::Blocks {
+                blocks: vec![block],
+            },
+        )?;
+        final_tip = Some(locked.status().tip);
+        drop(locked);
+        // Tokio's mutex is fair; yielding lets already-waiting HTTP and projection tasks take
+        // their turn before the next block import reacquires it.
+        tokio::task::yield_now().await;
+    }
+
+    peers.update_syncing(peer_key, session.is_syncing());
+    let gossip = match (first_tip, final_tip) {
+        (Some(before), Some(after)) if before != after => vec![Envelope::Inventory {
+            block_hashes: vec![after],
+        }],
+        _ => Vec::new(),
+    };
+    Ok((responses, gossip))
+}
+
+fn handle_blocking_peer_envelope(
+    session: &mut PeerSession,
+    node: &mut Node<ConsensusChainStore>,
+    envelope: Envelope,
+) -> Result<Vec<Envelope>> {
+    let handle = tokio::runtime::Handle::current();
+    if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+        tokio::task::block_in_place(|| session.handle(node, envelope, unix_time_secs()))
+    } else {
+        // Some unit tests deliberately use Tokio's current-thread runtime, where block_in_place
+        // is unavailable. Production uses the multi-thread runtime from #[tokio::main].
+        session.handle(node, envelope, unix_time_secs())
     }
 }
 
@@ -1264,6 +1349,62 @@ mod tests {
             panic!("expected signed candidate relay");
         };
         assert_eq!(candidates[0].header.hash(), candidate_hash);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn range_import_advances_through_single_block_lock_turns() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut source =
+            Node::open(ConsensusChainStore::open(directory.path().join("source.sqlite3")).unwrap())
+                .unwrap();
+        for height in 1..=3 {
+            source
+                .mine_next(
+                    GENESIS_TIMESTAMP + height * crate::consensus::HEARTBEAT_TARGET_INTERVAL_SECS,
+                    [91; 32],
+                )
+                .unwrap();
+        }
+        let remote = source.status();
+        let blocks = source
+            .chain()
+            .canonical_blocks_after(Some(0))
+            .into_iter()
+            .cloned()
+            .collect();
+        let target = Arc::new(Mutex::new(
+            Node::open(ConsensusChainStore::open(directory.path().join("target.sqlite3")).unwrap())
+                .unwrap(),
+        ));
+        let mut session = PeerSession::default();
+        {
+            let mut locked = target.lock().await;
+            session
+                .handle(
+                    &mut locked,
+                    Envelope::Hello(Hello::new(remote.height, remote.tip)),
+                    GENESIS_TIMESTAMP,
+                )
+                .unwrap();
+        }
+
+        let (responses, gossip) = import_block_range(
+            &target,
+            &mut session,
+            blocks,
+            &PeerRegistry::default(),
+            "test-peer",
+        )
+        .await
+        .unwrap();
+
+        assert!(responses.is_empty(), "the final block completes the range");
+        assert!(matches!(
+            gossip.as_slice(),
+            [Envelope::Inventory { block_hashes }] if block_hashes == &[remote.tip]
+        ));
+        assert_eq!(target.lock().await.status(), remote);
+        assert!(!session.is_syncing());
     }
 
     #[tokio::test]
