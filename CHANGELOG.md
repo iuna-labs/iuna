@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.25] - 2026-11-22
+
+### Fixed
+
+- keep fresh sync responsive
+
 ## [0.6.24] - 2026-11-21
 
 ### Fixed
