@@ -17,9 +17,10 @@ use iuna::{
             ConsensusHttpState, WalletState, operator_router, operator_token_hash,
             public_wallet_router, submit_bootstrap_ticket,
         },
-        consensus_local_state::{self, MempoolSnapshot},
+        consensus_local_state::{self, MempoolSnapshot, P2pPreference},
         consensus_network::{
-            ConsensusNetwork, ConsensusRelay, PeerAddress, SharedConsensusNode, seed_added_peers,
+            ConsensusNetwork, ConsensusRelay, P2pAdvertisement, PeerAddress, SharedConsensusNode,
+            seed_added_peers,
         },
         consensus_store::ConsensusChainStore,
         consensus_ui_store::ConsensusUiStore,
@@ -42,6 +43,7 @@ struct Options {
     http_addr: SocketAddr,
     wallet_endpoint_addr: Option<SocketAddr>,
     p2p_addr: SocketAddr,
+    p2p_addr_configured: bool,
     peers: Vec<PeerAddress>,
     bootstrap_peers: Vec<PeerAddress>,
     no_bootstrap_peers: bool,
@@ -67,6 +69,7 @@ impl Default for Options {
                 .expect("valid default HTTP address"),
             wallet_endpoint_addr: None,
             p2p_addr: "0.0.0.0:9444".parse().expect("valid default P2P address"),
+            p2p_addr_configured: false,
             peers: Vec::new(),
             bootstrap_peers: Vec::new(),
             no_bootstrap_peers: false,
@@ -89,6 +92,35 @@ async fn main() -> Result<()> {
             backup.display()
         );
     }
+    let p2p_preference =
+        consensus_local_state::load_p2p(&options.data_dir).unwrap_or_else(|error| {
+            eprintln!("saved P2P preference ignored: {error:#}");
+            P2pPreference::default()
+        });
+    let p2p_addr = if options.p2p_addr_configured {
+        options.p2p_addr
+    } else {
+        SocketAddr::new(
+            if p2p_preference.public_enabled {
+                [0, 0, 0, 0].into()
+            } else {
+                [127, 0, 0, 1].into()
+            },
+            p2p_preference.bind_port,
+        )
+    };
+    let p2p_active_public = !p2p_addr.ip().is_loopback();
+    let initial_advertisement = if p2p_active_public {
+        p2p_preference
+            .public_address
+            .clone()
+            .unwrap_or_else(|| format!("0.0.0.0:{}", p2p_addr.port()))
+            .parse::<PeerAddress>()
+            .ok()
+    } else {
+        None
+    };
+    let p2p_advertisement = P2pAdvertisement::new(initial_advertisement);
     let chain_store = ConsensusChainStore::open(options.data_dir.join("chain.sqlite3"))?;
     let ui_store = ConsensusUiStore::open(options.data_dir.join("ui.sqlite3"))?;
     let wallet_path = options.data_dir.join("wallet.json");
@@ -130,7 +162,7 @@ async fn main() -> Result<()> {
         if wallet_addr.port() == options.http_addr.port() {
             bail!("wallet endpoint port must differ from the operator HTTP port");
         }
-        if wallet_addr.port() == options.p2p_addr.port() {
+        if wallet_addr.port() == p2p_addr.port() {
             bail!("wallet endpoint port must differ from the P2P listener port");
         }
     }
@@ -161,11 +193,12 @@ async fn main() -> Result<()> {
 
     let peer_store = options.data_dir.join("peers.json");
     seed_added_peers(&peer_store, &options.bootstrap_peers)?;
-    let network = ConsensusNetwork::start_with_peer_store(
+    let network = ConsensusNetwork::start_configured(
         Arc::clone(&node),
-        options.p2p_addr,
+        p2p_addr,
         options.peers,
         Some(peer_store),
+        p2p_advertisement.clone(),
     )
     .await?;
     let http_listener = TcpListener::bind(options.http_addr)
@@ -295,6 +328,11 @@ async fn main() -> Result<()> {
         heartbeat_hashes,
         ledger_mining,
         ledger_last_ticket_height,
+        p2p_preference: Arc::new(RwLock::new(p2p_preference)),
+        p2p_preference_path: consensus_local_state::p2p_path(&options.data_dir),
+        p2p_runtime_addr: network.local_addr(),
+        p2p_command_line_override: options.p2p_addr_configured,
+        p2p_advertisement,
     };
     let application = operator_router(http_state.clone(), options.http_addr);
     let server = axum::serve(http_listener, application).with_graceful_shutdown(async {
@@ -651,6 +689,7 @@ fn parse_options(arguments: impl IntoIterator<Item = String>) -> Result<Option<O
                 options.p2p_addr = value(&mut arguments, "--p2p")?
                     .parse()
                     .context("parsing --p2p socket address")?;
+                options.p2p_addr_configured = true;
             }
             "--bootstrap-peer" => {
                 options.bootstrap_peers.push(
@@ -700,7 +739,7 @@ fn print_help() {
          --data-dir PATH   Chain and screen-data directory (default ~/.iuna)\n\
          --http ADDRESS    Operator HTTP address (default 127.0.0.1:8080)\n\
          --wallet-endpoint ADDRESS  Opt-in public wallet API on a separate listener\n\
-         --p2p ADDRESS     P2P listen address (default 0.0.0.0:9444)\n\
+         --p2p ADDRESS     P2P listen address (overrides saved public-node settings)\n\
          --peer ADDRESS    Outbound peer, IP:port or host:port; may be repeated\n\
          --bootstrap-peer ADDRESS  Outbound peer added once to peers.json; may be repeated\n\
                            (default: the nodes in KNOWN_NODES.txt)\n\

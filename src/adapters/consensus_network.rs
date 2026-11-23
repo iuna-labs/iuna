@@ -53,8 +53,32 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const OUTBOUND_CHANNEL_CAPACITY: usize = 1_024;
 /// Upper bound on outbound peers an operator can configure at runtime.
 pub const MAX_PEER_TARGETS: usize = 32;
+/// Hello discovery must never consume the operator's configured-peer allowance.
+const MAX_DISCOVERED_PEER_TARGETS: usize = 8;
 
 pub type SharedConsensusNode = Arc<Mutex<Node<ConsensusChainStore>>>;
+
+/// The address put in new Hello messages. The HTTP settings endpoint can replace it live without
+/// disturbing established TCP sessions.
+#[derive(Clone, Default)]
+pub struct P2pAdvertisement(Arc<RwLock<Option<PeerAddress>>>);
+
+impl P2pAdvertisement {
+    pub fn new(address: Option<PeerAddress>) -> Self {
+        Self(Arc::new(RwLock::new(address)))
+    }
+
+    pub fn get(&self) -> Option<PeerAddress> {
+        self.0
+            .read()
+            .expect("P2P advertisement lock poisoned")
+            .clone()
+    }
+
+    pub fn set(&self, address: Option<PeerAddress>) {
+        *self.0.write().expect("P2P advertisement lock poisoned") = address;
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ConnectedPeer {
@@ -72,7 +96,7 @@ pub struct ConnectedPeer {
 #[derive(Clone, Debug, Serialize)]
 pub struct PeerTarget {
     pub address: String,
-    /// `startup` for `--peer` arguments, `added` for peers added at runtime (persisted).
+    /// `startup` for `--peer`, `added` for persisted UI peers, `discovered` for Hello endpoints.
     pub source: &'static str,
     pub connected: bool,
     pub last_attempt: Option<u64>,
@@ -304,7 +328,11 @@ impl PeerRegistry {
             if targets.contains_key(&address) {
                 bail!("{address} is already a configured peer");
             }
-            if targets.len() >= MAX_PEER_TARGETS {
+            let configured = targets
+                .values()
+                .filter(|target| target.source != "discovered")
+                .count();
+            if configured >= MAX_PEER_TARGETS {
                 bail!("at most {MAX_PEER_TARGETS} peers can be configured");
             }
             targets.insert(address.clone(), new_target(&address, "added"));
@@ -318,6 +346,23 @@ impl PeerRegistry {
         }
         let _ = commands.send(PeerCommand::Add(address));
         Ok(())
+    }
+
+    fn discover_target(&self, address: PeerAddress) {
+        let Ok(commands) = self.command_sender() else {
+            return;
+        };
+        let mut targets = self.targets.write().expect("peer registry lock poisoned");
+        let discovered = targets
+            .values()
+            .filter(|target| target.source == "discovered")
+            .count();
+        if targets.contains_key(&address) || discovered >= MAX_DISCOVERED_PEER_TARGETS {
+            return;
+        }
+        targets.insert(address.clone(), new_target(&address, "discovered"));
+        drop(targets);
+        let _ = commands.send(PeerCommand::Add(address));
     }
 
     pub fn remove_target(&self, address: impl Into<PeerAddress>) -> Result<()> {
@@ -506,6 +551,14 @@ pub struct ConsensusNetwork {
     supervisor: JoinHandle<()>,
 }
 
+#[derive(Clone)]
+struct NetworkContext {
+    node: SharedConsensusNode,
+    outbound: broadcast::Sender<Envelope>,
+    peers: PeerRegistry,
+    advertisement: P2pAdvertisement,
+}
+
 impl ConsensusNetwork {
     pub async fn start(
         node: SharedConsensusNode,
@@ -522,6 +575,23 @@ impl ConsensusNetwork {
         bind_addr: SocketAddr,
         outbound_peers: Vec<PeerAddress>,
         peer_store: Option<PathBuf>,
+    ) -> Result<Self> {
+        Self::start_configured(
+            node,
+            bind_addr,
+            outbound_peers,
+            peer_store,
+            P2pAdvertisement::default(),
+        )
+        .await
+    }
+
+    pub async fn start_configured(
+        node: SharedConsensusNode,
+        bind_addr: SocketAddr,
+        outbound_peers: Vec<PeerAddress>,
+        peer_store: Option<PathBuf>,
+        advertisement: P2pAdvertisement,
     ) -> Result<Self> {
         let listener = TcpListener::bind(bind_addr)
             .await
@@ -558,13 +628,17 @@ impl ConsensusNetwork {
             .iter()
             .filter_map(|target| target.address.parse().ok())
             .collect();
+        let context = NetworkContext {
+            node,
+            outbound: outbound.clone(),
+            peers: peers.clone(),
+            advertisement,
+        };
         let supervisor = tokio::spawn(run_supervisor(
             listener,
-            node,
-            outbound.clone(),
+            context,
             shutdown_rx,
             initial,
-            peers.clone(),
             command_rx,
         ));
         Ok(Self {
@@ -624,23 +698,20 @@ fn new_target(address: &PeerAddress, source: &'static str) -> PeerTarget {
 
 async fn run_supervisor(
     listener: TcpListener,
-    node: SharedConsensusNode,
-    outbound: broadcast::Sender<Envelope>,
+    context: NetworkContext,
     mut shutdown: watch::Receiver<bool>,
     outbound_peers: Vec<PeerAddress>,
-    peers: PeerRegistry,
     mut commands: mpsc::UnboundedReceiver<PeerCommand>,
 ) {
     let inbound_limit = Arc::new(StdMutex::new(InboundLimiter::default()));
     let mut outbound_tasks: HashMap<PeerAddress, JoinHandle<()>> = HashMap::new();
     let task_shutdown = shutdown.clone();
+    let task_context = context.clone();
     let spawn_outbound = |peer: PeerAddress| {
         tokio::spawn(run_outbound_peer(
             peer,
-            Arc::clone(&node),
-            outbound.clone(),
+            task_context.clone(),
             task_shutdown.clone(),
-            peers.clone(),
         ))
     };
     for peer in outbound_peers {
@@ -664,7 +735,7 @@ async fn run_supervisor(
                     if let Some(task) = outbound_tasks.remove(&peer) {
                         task.abort();
                     }
-                    peers.disconnect(&format!("outbound:{peer}"));
+                    context.peers.disconnect(&format!("outbound:{peer}"));
                 }
             },
             accepted = listener.accept() => {
@@ -674,26 +745,23 @@ async fn run_supervisor(
                 let Some(permit) = InboundLimiter::acquire(&inbound_limit, peer_addr.ip()) else {
                     continue;
                 };
-                let node = Arc::clone(&node);
-                let receiver = outbound.subscribe();
-                let relay_outbound = outbound.clone();
+                let receiver = context.outbound.subscribe();
                 let session_shutdown = shutdown.clone();
-                let peers = peers.clone();
+                let session_context = context.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
                     let key = format!("inbound:{peer_addr}");
-                    peers.connect(key.clone(), peer_addr, "inbound");
+                    session_context.peers.connect(key.clone(), peer_addr, "inbound");
                     let _ = run_connection(
                         stream,
-                        node,
                         receiver,
-                        relay_outbound,
                         session_shutdown,
-                        peers.clone(),
+                        session_context.clone(),
                         key.clone(),
+                        Some(peer_addr),
                     )
                     .await;
-                    peers.disconnect(&key);
+                    session_context.peers.disconnect(&key);
                 });
             }
         }
@@ -723,10 +791,8 @@ async fn connect_peer(peer: &PeerAddress) -> io::Result<TcpStream> {
 
 async fn run_outbound_peer(
     peer: PeerAddress,
-    node: SharedConsensusNode,
-    outbound: broadcast::Sender<Envelope>,
+    context: NetworkContext,
     mut shutdown: watch::Receiver<bool>,
-    peers: PeerRegistry,
 ) {
     loop {
         if *shutdown.borrow() {
@@ -736,24 +802,23 @@ async fn run_outbound_peer(
         match connect_peer(&peer).await {
             Ok(stream) => {
                 let key = format!("outbound:{peer}");
-                peers.connect(key.clone(), &peer, "outbound");
-                peers.update_target(&peer, |target| {
+                context.peers.connect(key.clone(), &peer, "outbound");
+                context.peers.update_target(&peer, |target| {
                     target.connected = true;
                     target.last_attempt = Some(attempt);
                     target.last_error = None;
                 });
                 let result = run_connection(
                     stream,
-                    Arc::clone(&node),
-                    outbound.subscribe(),
-                    outbound.clone(),
+                    context.outbound.subscribe(),
                     shutdown.clone(),
-                    peers.clone(),
+                    context.clone(),
                     key.clone(),
+                    None,
                 )
                 .await;
-                peers.disconnect(&key);
-                peers.update_target(&peer, |target| {
+                context.peers.disconnect(&key);
+                context.peers.update_target(&peer, |target| {
                     target.connected = false;
                     target.last_error = Some(match result {
                         Ok(()) => "connection closed".to_owned(),
@@ -761,7 +826,7 @@ async fn run_outbound_peer(
                     });
                 });
             }
-            Err(error) => peers.update_target(&peer, |target| {
+            Err(error) => context.peers.update_target(&peer, |target| {
                 target.last_attempt = Some(attempt);
                 target.last_error = Some(error.to_string());
             }),
@@ -779,13 +844,18 @@ async fn run_outbound_peer(
 
 async fn run_connection(
     stream: TcpStream,
-    node: SharedConsensusNode,
     mut outbound: broadcast::Receiver<Envelope>,
-    relay_outbound: broadcast::Sender<Envelope>,
     mut shutdown: watch::Receiver<bool>,
-    peers: PeerRegistry,
+    context: NetworkContext,
     peer_key: String,
+    discover_from: Option<SocketAddr>,
 ) -> Result<()> {
+    let NetworkContext {
+        node,
+        outbound: relay_outbound,
+        peers,
+        advertisement,
+    } = context;
     stream
         .set_nodelay(true)
         .context("enabling P2P TCP_NODELAY")?;
@@ -794,7 +864,10 @@ async fn run_connection(
     let status = node.lock().await.status();
     write_envelope(
         &mut writer,
-        &Envelope::Hello(Hello::new(status.height, status.tip)),
+        &Envelope::Hello(
+            Hello::new(status.height, status.tip)
+                .with_listen_addr(advertisement.get().map(|address| address.to_string())),
+        ),
     )
     .await?;
     let mut session = PeerSession::default();
@@ -827,7 +900,23 @@ async fn run_connection(
                 read_deadline = Instant::now() + IDLE_TIMEOUT;
                 let envelope = decode_line(&line)?;
                 match &envelope {
-                    Envelope::Hello(hello) => peers.update_hello(&peer_key, hello),
+                    Envelope::Hello(hello) => {
+                        peers.update_hello(&peer_key, hello);
+                        if hello.validate().is_ok()
+                            && let (Some(remote), Some(advertised)) = (discover_from, &hello.listen_addr)
+                            && let Ok(advertised) = advertised.parse::<SocketAddr>()
+                        {
+                                let remote_ip = remote.ip().to_canonical();
+                                let advertised_ip = advertised.ip().to_canonical();
+                                if advertised.port() > 0
+                                    && !remote_ip.is_loopback()
+                                    && !remote_ip.is_unspecified()
+                                    && (advertised_ip == remote_ip || advertised_ip.is_unspecified())
+                                {
+                                    peers.discover_target(SocketAddr::new(remote_ip, advertised.port()).into());
+                                }
+                        }
+                    }
                     Envelope::Blocks { blocks } => {
                         if let Some(block) = blocks.iter().max_by_key(|block| block.header.height) {
                             peers.observe_block(&peer_key, block.header.height, &block.hash());
@@ -1279,11 +1368,30 @@ mod tests {
             matches!(received.try_recv(), Ok(PeerCommand::Remove(removed)) if removed == address.into())
         );
 
+        for port in 0..MAX_DISCOVERED_PEER_TARGETS as u16 {
+            registry.discover_target(SocketAddr::from(([198, 51, 100, 8], 30_000 + port)).into());
+        }
+        registry.discover_target(SocketAddr::from(([198, 51, 100, 8], 40_000)).into());
+        assert_eq!(
+            registry
+                .targets()
+                .iter()
+                .filter(|target| target.source == "discovered")
+                .count(),
+            MAX_DISCOVERED_PEER_TARGETS,
+            "Hello discovery has its own bound"
+        );
+
         for port in 0..MAX_PEER_TARGETS as u16 {
             registry
                 .add_target(SocketAddr::from(([203, 0, 113, 8], 20_000 + port)))
                 .unwrap();
         }
+        assert_eq!(
+            registry.targets().len(),
+            MAX_PEER_TARGETS + MAX_DISCOVERED_PEER_TARGETS,
+            "discovered peers do not consume operator slots"
+        );
         assert!(
             registry.add_target(address).is_err(),
             "the target list is bounded"

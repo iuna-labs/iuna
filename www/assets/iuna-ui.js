@@ -76,6 +76,7 @@ window.iunaApp = function iunaApp() {
     contactModalOpen: false,
     contactEditingAddress: null,
     passwordForm: { current: "", next: "", confirmation: "", busy: false },
+    p2pForm: { publicEnabled: false, bindPort: 9444, publicAddress: "", busy: false, dirty: false },
     heartbeats: [],
     ledgerBlocks: [],
     mempool: { ledger_transactions: [], mining_tickets: [] },
@@ -751,6 +752,11 @@ window.iunaApp = function iunaApp() {
         const status = statusResult.value;
         this.sampleLocalHashrate(status);
         this.status = status;
+        if (!this.p2pForm.busy && !this.p2pForm.dirty && status.p2p) {
+          this.p2pForm.publicEnabled = status.p2p.public_enabled === true;
+          this.p2pForm.bindPort = Number(status.p2p.bind_port || 9444);
+          this.p2pForm.publicAddress = status.p2p.public_address || "";
+        }
         if (!this.mining.busy) this.mining.workers = Number(status.heartbeat_mining_workers || 1);
         void this.reconcileSelectedTransaction();
         if (this.tab === "metrics") await this.refreshMetrics(true);
@@ -865,6 +871,32 @@ window.iunaApp = function iunaApp() {
         throw error;
       }
       return payload;
+    },
+
+    async saveP2pSettings() {
+      const bindPort = Number(this.p2pForm.bindPort);
+      if (!Number.isInteger(bindPort) || bindPort < 1 || bindPort > 65535) {
+        this.notify("P2P port must be between 1 and 65535", "error");
+        return;
+      }
+      this.p2pForm.busy = true;
+      try {
+        const payload = await this.postJson("/api/settings/p2p", {
+          public_enabled: this.p2pForm.publicEnabled === true,
+          bind_port: bindPort,
+          public_address: this.p2pForm.publicAddress.trim() || null,
+        });
+        this.status = { ...this.status, p2p: payload };
+        this.p2pForm.publicEnabled = payload.public_enabled === true;
+        this.p2pForm.bindPort = Number(payload.bind_port);
+        this.p2pForm.publicAddress = payload.public_address || "";
+        this.p2pForm.dirty = false;
+        this.notify(payload.restart_required ? "Saved — restart iuna to apply the listener change" : "Public-node settings saved", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.p2pForm.busy = false;
+      }
     },
 
     // Like getJson, but rejects a successful response whose body has the wrong shape, and logs

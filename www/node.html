@@ -813,7 +813,7 @@
             <button class="primary" type="submit" :disabled="peerForm.busy">Add peer</button>
           </form>
           <div class="table-wrap" x-show="peerTargets.length">
-            <table class="peer-table"><thead><tr><th>Address</th><th>Source</th><th>State</th><th>Last attempt</th><th>Last error</th><th></th></tr></thead><tbody><template x-for="target in peerTargets" :key="target.address"><tr><td><code x-text="target.address"></code></td><td x-text="target.source === 'startup' ? 'Command line' : 'Added'"></td><td x-text="peerTargetState(target)"></td><td x-text="target.last_attempt ? timeLabel(target.last_attempt) : '-'"></td><td class="muted" x-text="target.last_error || '-'"></td><td><button x-show="browserCanManage()" @click="changePeer('remove', target.address)" :disabled="peerForm.busy">Remove</button></td></tr></template></tbody></table>
+            <table class="peer-table"><thead><tr><th>Address</th><th>Source</th><th>State</th><th>Last attempt</th><th>Last error</th><th></th></tr></thead><tbody><template x-for="target in peerTargets" :key="target.address"><tr><td><code x-text="target.address"></code></td><td x-text="target.source === 'startup' ? 'Command line' : (target.source === 'discovered' ? 'Discovered' : 'Added')"></td><td x-text="peerTargetState(target)"></td><td x-text="target.last_attempt ? timeLabel(target.last_attempt) : '-'"></td><td class="muted" x-text="target.last_error || '-'"></td><td><button x-show="browserCanManage()" @click="changePeer('remove', target.address)" :disabled="peerForm.busy">Remove</button></td></tr></template></tbody></table>
           </div>
           <div class="empty" x-show="!peerTargets.length">No outbound peers configured. Add one to join an existing network.</div>
         </article>
@@ -995,6 +995,21 @@
               <label>New password<input x-model="passwordForm.next" type="password" minlength="10" maxlength="1024" autocomplete="new-password" required></label>
               <label>Repeat new password<input x-model="passwordForm.confirmation" type="password" minlength="10" maxlength="1024" autocomplete="new-password" required></label>
               <button class="primary" type="submit" :disabled="passwordForm.busy || !browserCanManage()" x-text="passwordForm.busy ? 'Changing…' : 'Change password'"></button>
+            </form>
+          </div>
+          <div class="settings-row">
+            <div>
+              <h3>Public node</h3>
+              <p class="muted">Accept inbound P2P connections and tell peers where they can reach this node. Forward the chosen TCP port in your router or firewall.</p>
+              <p class="muted" x-show="status.p2p?.runtime_address">Currently listening on <code x-text="status.p2p?.runtime_address"></code>.</p>
+              <p class="notice warn" x-show="status.p2p?.restart_required">Restart the iuna process to apply the public-listener or port change. The web page itself does not need a separate restart.</p>
+              <p class="notice warn" x-show="status.p2p?.command_line_override">The <code>--p2p</code> command-line option controls this listener; remove it before the saved enable/port values can take effect.</p>
+            </div>
+            <form class="stacked-form" @submit.prevent="saveP2pSettings">
+              <label class="check-row"><input type="checkbox" x-model="p2pForm.publicEnabled" @change="p2pForm.dirty = true" :disabled="status.p2p?.command_line_override">Accept public P2P connections</label>
+              <label>TCP bind port<input type="number" min="1" max="65535" step="1" x-model.number="p2pForm.bindPort" @input="p2pForm.dirty = true" :disabled="status.p2p?.command_line_override" required></label>
+              <label>Public P2P address<input type="text" maxlength="128" placeholder="203.0.113.10:9444" x-model="p2pForm.publicAddress" @input="p2pForm.dirty = true" autocomplete="off"><span class="muted">Optional IP:port for NAT or port forwarding. Blank lets the peer use your connection IP and bind port. This value applies to new connections immediately when the public listener is active.</span></label>
+              <button class="primary" type="submit" :disabled="p2pForm.busy || !browserCanManage()" x-text="p2pForm.busy ? 'Saving…' : 'Save public-node settings'"></button>
             </form>
           </div>
           <div class="settings-row">

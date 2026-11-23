@@ -1,5 +1,5 @@
 //! Small JSON files in the data directory for node-local state that is not consensus data:
-//! the pending mempool and the operator's Heartbeat mining preference.
+//! the pending mempool and the operator's mining and P2P preferences.
 
 use std::{
     fs, io,
@@ -15,8 +15,10 @@ use crate::consensus::{Sidecar, TicketTransaction, Transaction};
 /// A mempool snapshot is rebuilt from at most this many bytes; anything larger is ignored.
 const MAX_MEMPOOL_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PREFERENCE_FILE_BYTES: u64 = 4 * 1024;
+const MAX_LEGACY_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
 const INSTANCE_ID_BYTES: usize = 16;
 static MINING_WRITE_LOCK: Mutex<()> = Mutex::new(());
+static P2P_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct MempoolSnapshot {
@@ -36,6 +38,24 @@ pub struct MiningPreference {
     pub last_ledger_ticket_height: Option<u64>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct P2pPreference {
+    pub public_enabled: bool,
+    pub bind_port: u16,
+    #[serde(default)]
+    pub public_address: Option<String>,
+}
+
+impl Default for P2pPreference {
+    fn default() -> Self {
+        Self {
+            public_enabled: false,
+            bind_port: 9444,
+            public_address: None,
+        }
+    }
+}
+
 pub fn mempool_path(data_dir: &Path) -> PathBuf {
     data_dir.join("mempool.json")
 }
@@ -43,6 +63,10 @@ pub fn mempool_path(data_dir: &Path) -> PathBuf {
 /// Lives next to `wallet.json`, which is how the HTTP adapter knows the data directory.
 pub fn mining_path(wallet_path: &Path) -> PathBuf {
     wallet_path.with_file_name("mining.json")
+}
+
+pub fn p2p_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("p2p.json")
 }
 
 /// Returns a stable, non-secret identifier for this data directory.
@@ -106,6 +130,55 @@ pub fn save_mining_from(path: &Path, preference: impl FnOnce() -> MiningPreferen
     write_json(path, &preference())
 }
 
+/// Loads the current P2P preference. On the first 0.5+ run, recover the values that 0.5 archived
+/// in `config.json.backup` instead of making an existing public-node operator type them again.
+pub fn load_p2p(data_dir: &Path) -> Result<P2pPreference> {
+    let path = p2p_path(data_dir);
+    if let Some(preference) = read_json(&path, MAX_PREFERENCE_FILE_BYTES)? {
+        return validate_p2p(preference);
+    }
+    let legacy = data_dir.join("config.json.backup");
+    let Some(value) = read_json::<serde_json::Value>(&legacy, MAX_LEGACY_CONFIG_FILE_BYTES)? else {
+        return Ok(P2pPreference::default());
+    };
+    let public_address = value
+        .get("p2p_announce_addr")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    validate_p2p(P2pPreference {
+        public_enabled: value
+            .get("p2p_accept_inbound")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(public_address.is_some()),
+        bind_port: value
+            .get("p2p_bind_port")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|port| u16::try_from(port).ok())
+            .filter(|port| *port > 0)
+            .unwrap_or(9444),
+        public_address,
+    })
+}
+
+fn validate_p2p(preference: P2pPreference) -> Result<P2pPreference> {
+    if preference.bind_port == 0 {
+        anyhow::bail!("P2P bind port must be between 1 and 65535");
+    }
+    if let Some(address) = &preference.public_address {
+        address
+            .parse::<std::net::SocketAddr>()
+            .with_context(|| format!("invalid public P2P address {address}"))?;
+    }
+    Ok(preference)
+}
+
+pub fn save_p2p(path: &Path, preference: &P2pPreference) -> Result<()> {
+    let _guard = P2P_WRITE_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("P2P preference lock poisoned"))?;
+    write_json(path, preference)
+}
+
 fn read_json<T: DeserializeOwned>(path: &Path, limit: u64) -> Result<Option<T>> {
     match fs::metadata(path) {
         Ok(metadata) if metadata.len() > limit => {
@@ -152,6 +225,19 @@ mod tests {
         save_mining(&mining, preference).unwrap();
         assert_eq!(load_mining(&mining).unwrap(), Some(preference));
 
+        let p2p = p2p_path(directory.path());
+        assert_eq!(
+            load_p2p(directory.path()).unwrap(),
+            P2pPreference::default()
+        );
+        let public = P2pPreference {
+            public_enabled: true,
+            bind_port: 9555,
+            public_address: Some("203.0.113.10:9444".to_owned()),
+        };
+        save_p2p(&p2p, &public).unwrap();
+        assert_eq!(load_p2p(directory.path()).unwrap(), public);
+
         let instance_id = load_or_create_instance_id(directory.path()).unwrap();
         assert_eq!(instance_id.len(), INSTANCE_ID_BYTES * 2);
         assert_eq!(
@@ -161,5 +247,24 @@ mod tests {
 
         fs::write(&mining, "not json").unwrap();
         assert!(load_mining(&mining).is_err());
+    }
+
+    #[test]
+    fn recovers_pre_0_5_public_node_settings_from_the_archived_config() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("config.json.backup"),
+            r#"{"p2p_accept_inbound":true,"p2p_bind_port":9555,"p2p_announce_addr":"203.0.113.10:9444"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_p2p(directory.path()).unwrap(),
+            P2pPreference {
+                public_enabled: true,
+                bind_port: 9555,
+                public_address: Some("203.0.113.10:9444".to_owned()),
+            }
+        );
     }
 }

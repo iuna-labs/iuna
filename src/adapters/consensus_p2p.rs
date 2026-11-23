@@ -28,6 +28,10 @@ pub struct Hello {
     pub genesis_hash: Hash,
     pub height: u64,
     pub tip_hash: Hash,
+    /// Public P2P endpoint, when this node opted into accepting inbound peers. Optional keeps the
+    /// handshake compatible with nodes from before public-node settings returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_addr: Option<String>,
 }
 
 impl Hello {
@@ -38,7 +42,13 @@ impl Hello {
             genesis_hash: GENESIS_HASH,
             height,
             tip_hash,
+            listen_addr: None,
         }
+    }
+
+    pub fn with_listen_addr(mut self, listen_addr: Option<String>) -> Self {
+        self.listen_addr = listen_addr;
+        self
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -208,6 +218,26 @@ mod tests {
         let mut foreign = hello;
         foreign.genesis_hash = [0; 32];
         assert!(foreign.validate().is_err());
+    }
+
+    #[test]
+    fn hello_public_endpoint_is_optional_and_backward_compatible() {
+        let tip = [9_u8; 32];
+        let old = serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "network_id": NETWORK_ID,
+            "genesis_hash": GENESIS_HASH,
+            "height": 7,
+            "tip_hash": tip,
+        });
+        let decoded: Hello = serde_json::from_value(old).unwrap();
+        assert_eq!(decoded.listen_addr, None);
+
+        let announced = Hello::new(7, tip).with_listen_addr(Some("203.0.113.10:9444".to_owned()));
+        assert_eq!(
+            serde_json::to_value(announced).unwrap()["listen_addr"],
+            "203.0.113.10:9444"
+        );
     }
 
     #[test]

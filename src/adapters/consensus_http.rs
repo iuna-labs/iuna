@@ -29,9 +29,9 @@ use sha2::{Digest, Sha256};
 use crate::{
     adapters::{
         consensus_index_html::INDEX_HTML,
-        consensus_local_state::{self, MiningPreference},
+        consensus_local_state::{self, MiningPreference, P2pPreference},
         consensus_network::{
-            ConnectedPeer, ConsensusRelay, PeerAddress, PeerRegistry, PeerTarget,
+            ConnectedPeer, ConsensusRelay, P2pAdvertisement, PeerAddress, PeerRegistry, PeerTarget,
             SharedConsensusNode,
         },
         consensus_ui_store::{
@@ -70,6 +70,11 @@ pub struct ConsensusHttpState {
     pub heartbeat_hashes: Arc<AtomicU64>,
     pub ledger_mining: Arc<AtomicBool>,
     pub ledger_last_ticket_height: Arc<AtomicU64>,
+    pub p2p_preference: Arc<RwLock<P2pPreference>>,
+    pub p2p_preference_path: PathBuf,
+    pub p2p_runtime_addr: SocketAddr,
+    pub p2p_command_line_override: bool,
+    pub p2p_advertisement: P2pAdvertisement,
 }
 
 pub struct WalletState {
@@ -116,10 +121,30 @@ pub struct OperatorStatus {
     pub ledger_mining_enabled: bool,
     pub ledger_last_ticket_height: Option<u64>,
     pub connected_peers: usize,
+    pub p2p: P2pSettingsView,
     pub target: String,
     pub difficulty: String,
     /// Easiest allowed target (difficulty 1), so clients can chart difficulty per block.
     pub pow_limit: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct P2pSettingsView {
+    pub public_enabled: bool,
+    pub bind_port: u16,
+    pub public_address: Option<String>,
+    pub runtime_address: String,
+    pub runtime_public: bool,
+    pub restart_required: bool,
+    pub command_line_override: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct P2pSettingsRequest {
+    pub public_enabled: bool,
+    pub bind_port: u16,
+    #[serde(default)]
+    pub public_address: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -680,6 +705,7 @@ pub fn router(state: ConsensusHttpState) -> Router {
         .route("/api/hash-mining", post(set_heartbeat_mining))
         .route("/api/ledger-mining", post(set_ledger_mining))
         .route("/api/peers", post(change_peer))
+        .route("/api/settings/p2p", post(set_p2p_settings))
         .route("/api/hash-mining/heartbeat", post(mine_heartbeat))
         .route_layer(DefaultBodyLimit::max(4 * 1024))
         .route_layer(middleware::from_fn_with_state(
@@ -2206,10 +2232,40 @@ async fn status(State(state): State<ConsensusHttpState>) -> Json<OperatorStatus>
             state.ledger_last_ticket_height.load(Ordering::Relaxed),
         ),
         connected_peers: state.peers.connected().len(),
+        p2p: p2p_settings_view(&state),
         target: hex(&node.chain().tip().tip_target),
         difficulty: difficulty_label(node.chain().tip().tip_target),
         pow_limit: hex(&MAX_TARGET),
     })
+}
+
+fn p2p_settings_view(state: &ConsensusHttpState) -> P2pSettingsView {
+    let preference = state
+        .p2p_preference
+        .read()
+        .expect("P2P preference lock poisoned")
+        .clone();
+    let runtime_public = !state.p2p_runtime_addr.ip().is_loopback();
+    let restart_required = !state.p2p_command_line_override
+        && (preference.public_enabled != runtime_public
+            || preference.bind_port != state.p2p_runtime_addr.port());
+    P2pSettingsView {
+        public_enabled: if state.p2p_command_line_override {
+            runtime_public
+        } else {
+            preference.public_enabled
+        },
+        bind_port: if state.p2p_command_line_override {
+            state.p2p_runtime_addr.port()
+        } else {
+            preference.bind_port
+        },
+        public_address: preference.public_address,
+        runtime_address: state.p2p_runtime_addr.to_string(),
+        runtime_public,
+        restart_required,
+        command_line_override: state.p2p_command_line_override,
+    }
 }
 
 fn local_ledger_ticket_power(state: &ConsensusState, public_key: Option<PublicKey>) -> u64 {
@@ -2260,6 +2316,61 @@ async fn change_peer(
     };
     result.map_err(|error| api_error(StatusCode::CONFLICT, format!("{error:#}")))?;
     Ok(Json(state.peers.targets()))
+}
+
+async fn set_p2p_settings(
+    State(state): State<ConsensusHttpState>,
+    Json(request): Json<P2pSettingsRequest>,
+) -> ApiResult<P2pSettingsView> {
+    if request.bind_port == 0 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "P2P port must be between 1 and 65535",
+        ));
+    }
+    let public_address = request
+        .public_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|address| !address.is_empty())
+        .map(|address| {
+            address
+                .parse::<SocketAddr>()
+                .map(|address| address.to_string())
+                .map_err(|_| {
+                    api_error(
+                        StatusCode::BAD_REQUEST,
+                        "public P2P address must be IP:port, for example 203.0.113.10:9444",
+                    )
+                })
+        })
+        .transpose()?;
+    let preference = P2pPreference {
+        public_enabled: request.public_enabled,
+        bind_port: request.bind_port,
+        public_address,
+    };
+    consensus_local_state::save_p2p(&state.p2p_preference_path, &preference)
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")))?;
+    *state
+        .p2p_preference
+        .write()
+        .expect("P2P preference lock poisoned") = preference.clone();
+
+    // Announcing is safe to change live, but only while a public listener is actually active.
+    // Enabling or rebinding that listener still needs a process restart.
+    let runtime_public = !state.p2p_runtime_addr.ip().is_loopback();
+    let advertised = (runtime_public
+        && (preference.public_enabled || state.p2p_command_line_override))
+        .then(|| {
+            preference
+                .public_address
+                .clone()
+                .unwrap_or_else(|| format!("0.0.0.0:{}", state.p2p_runtime_addr.port()))
+        })
+        .and_then(|address| address.parse::<PeerAddress>().ok());
+    state.p2p_advertisement.set(advertised);
+    Ok(Json(p2p_settings_view(&state)))
 }
 
 async fn set_heartbeat_mining(
@@ -2966,6 +3077,11 @@ mod tests {
             heartbeat_hashes: Arc::new(AtomicU64::new(0)),
             ledger_mining: Arc::new(AtomicBool::new(false)),
             ledger_last_ticket_height: Arc::new(AtomicU64::new(0)),
+            p2p_preference: Arc::new(RwLock::new(P2pPreference::default())),
+            p2p_preference_path: consensus_local_state::p2p_path(directory.path()),
+            p2p_runtime_addr: "127.0.0.1:9444".parse().unwrap(),
+            p2p_command_line_override: false,
+            p2p_advertisement: P2pAdvertisement::default(),
         };
         let response = router(state.clone())
             .oneshot(Request::get("/").body(Body::empty()).unwrap())
@@ -3150,6 +3266,11 @@ mod tests {
             heartbeat_hashes: Arc::new(AtomicU64::new(0)),
             ledger_mining: Arc::new(AtomicBool::new(false)),
             ledger_last_ticket_height: Arc::new(AtomicU64::new(0)),
+            p2p_preference: Arc::new(RwLock::new(P2pPreference::default())),
+            p2p_preference_path: consensus_local_state::p2p_path(directory.path()),
+            p2p_runtime_addr: "127.0.0.1:9444".parse().unwrap(),
+            p2p_command_line_override: false,
+            p2p_advertisement: P2pAdvertisement::default(),
         };
         let body = serde_json::json!({
             "recipient": hex(&[91; 32]),
@@ -3204,6 +3325,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_node_settings_persist_announce_live_and_report_listener_restart() {
+        const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = management_state(&directory, Arc::new(Wallet::from_seed([42; 32])), TOKEN);
+        state.p2p_runtime_addr = "0.0.0.0:9444".parse().unwrap();
+
+        let response = router(state.clone())
+            .oneshot(json_request(
+                "/api/settings/p2p",
+                serde_json::json!({
+                    "public_enabled": true,
+                    "bind_port": 9444,
+                    "public_address": "203.0.113.10:9444",
+                })
+                .to_string(),
+                Some(TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(saved["restart_required"], false);
+        assert_eq!(
+            state.p2p_advertisement.get().unwrap().as_str(),
+            "203.0.113.10:9444"
+        );
+        assert_eq!(
+            consensus_local_state::load_p2p(directory.path())
+                .unwrap()
+                .public_address
+                .as_deref(),
+            Some("203.0.113.10:9444")
+        );
+
+        let response = router(state.clone())
+            .oneshot(json_request(
+                "/api/settings/p2p",
+                serde_json::json!({
+                    "public_enabled": true,
+                    "bind_port": 9555,
+                    "public_address": "203.0.113.10:9555",
+                })
+                .to_string(),
+                Some(TOKEN),
+            ))
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(saved["restart_required"], true);
+
+        let response = router(state)
+            .oneshot(json_request(
+                "/api/settings/p2p",
+                serde_json::json!({
+                    "public_enabled": true,
+                    "bind_port": 9555,
+                    "public_address": "not an address",
+                })
+                .to_string(),
+                Some(TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn trusted_local_setup_creates_and_unlocks_an_encrypted_wallet() {
         let directory = tempfile::tempdir().unwrap();
         let node =
@@ -3223,6 +3417,11 @@ mod tests {
             heartbeat_hashes: Arc::new(AtomicU64::new(0)),
             ledger_mining: Arc::new(AtomicBool::new(false)),
             ledger_last_ticket_height: Arc::new(AtomicU64::new(0)),
+            p2p_preference: Arc::new(RwLock::new(P2pPreference::default())),
+            p2p_preference_path: consensus_local_state::p2p_path(directory.path()),
+            p2p_runtime_addr: "127.0.0.1:9444".parse().unwrap(),
+            p2p_command_line_override: false,
+            p2p_advertisement: P2pAdvertisement::default(),
         };
         let response = router(state.clone())
             .oneshot(local_json_request(
@@ -3329,6 +3528,11 @@ mod tests {
             heartbeat_hashes: Arc::new(AtomicU64::new(0)),
             ledger_mining: Arc::new(AtomicBool::new(false)),
             ledger_last_ticket_height: Arc::new(AtomicU64::new(0)),
+            p2p_preference: Arc::new(RwLock::new(P2pPreference::default())),
+            p2p_preference_path: consensus_local_state::p2p_path(directory.path()),
+            p2p_runtime_addr: "127.0.0.1:9444".parse().unwrap(),
+            p2p_command_line_override: false,
+            p2p_advertisement: P2pAdvertisement::default(),
         };
         let phrase = format!("{} art", vec!["abandon"; 23].join(" "));
         let response = router(state)
@@ -3380,6 +3584,11 @@ mod tests {
             heartbeat_hashes: Arc::new(AtomicU64::new(0)),
             ledger_mining: Arc::new(AtomicBool::new(false)),
             ledger_last_ticket_height: Arc::new(AtomicU64::new(0)),
+            p2p_preference: Arc::new(RwLock::new(P2pPreference::default())),
+            p2p_preference_path: consensus_local_state::p2p_path(directory.path()),
+            p2p_runtime_addr: "127.0.0.1:9444".parse().unwrap(),
+            p2p_command_line_override: false,
+            p2p_advertisement: P2pAdvertisement::default(),
         };
         for (origin, host) in [
             (Some("https://malicious.example"), "127.0.0.1:8080"),
@@ -4594,6 +4803,11 @@ mod tests {
             heartbeat_hashes: Arc::new(AtomicU64::new(0)),
             ledger_mining: Arc::new(AtomicBool::new(false)),
             ledger_last_ticket_height: Arc::new(AtomicU64::new(0)),
+            p2p_preference: Arc::new(RwLock::new(P2pPreference::default())),
+            p2p_preference_path: consensus_local_state::p2p_path(directory.path()),
+            p2p_runtime_addr: "127.0.0.1:9444".parse().unwrap(),
+            p2p_command_line_override: false,
+            p2p_advertisement: P2pAdvertisement::default(),
         }
     }
 

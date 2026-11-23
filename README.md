@@ -49,9 +49,13 @@ balances. The deployment serves it at `https://stats.getiuna.org`; add
 cargo run --release
 ```
 
-By default the operator screen is available at `http://127.0.0.1:8080` and the
-P2P listener uses TCP port `9444`, with node data stored in `~/.iuna`. On the
-first upgrade from the old protocol, recognized legacy files are renamed
+By default the operator screen is available at `http://127.0.0.1:8080`; P2P
+uses TCP port `9444` but accepts only local connections until **Settings →
+Public node** is enabled. Public-node changes are stored in `~/.iuna/p2p.json`;
+enabling/disabling the listener or changing its bind port takes effect after
+restarting iuna, while a changed public announce address applies to new peer
+connections immediately. Node data is stored in `~/.iuna`. On the first
+upgrade from the old protocol, recognized legacy files are renamed
 to collision-safe `.backup` files before the new data is created. A chain of
 another network or genesis is set aside the same way; the wallet is kept. Initial
 Setup creates wallets with a
