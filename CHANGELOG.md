@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.27] - 2026-11-23
+
+### Fixed
+
+- align public P2P checkbox label
+
 ## [0.6.26] - 2026-11-23
 
 ### Added
