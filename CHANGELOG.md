@@ -5,6 +5,17 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.26] - 2026-11-23
+
+### Added
+
+- restore public node settings
+- align wallet and stats with node app
+
+### Fixed
+
+- update vulnerable desktop dependencies
+
 ## [0.6.25] - 2026-11-22
 
 ### Fixed
