@@ -2,9 +2,13 @@
 //! the pending mempool and the operator's mining and P2P preferences.
 
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Context, Result};
@@ -99,9 +103,7 @@ pub fn load_or_create_instance_id(data_dir: &Path) -> Result<String> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, &value).with_context(|| format!("writing {}", temporary.display()))?;
-    fs::rename(&temporary, &path).with_context(|| format!("replacing {}", path.display()))?;
+    write_atomically(&path, value.as_bytes())?;
     Ok(value)
 }
 
@@ -196,10 +198,40 @@ fn read_json<T: DeserializeOwned>(path: &Path, limit: u64) -> Result<Option<T>> 
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, serde_json::to_vec(value)?)
-        .with_context(|| format!("writing {}", temporary.display()))?;
-    fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))
+    write_atomically(path, &serde_json::to_vec(value)?)
+}
+
+/// Replaces `path` so that a crash or power loss leaves either the old or the new contents. The
+/// data is synced before the rename and the directory after it; without that a file can come
+/// back empty, and these files then silently fall back to defaults. Each write has its own
+/// temporary file, so two writers never interleave in one.
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let temporary = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = fs::File::create(&temporary)
+        .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
+        .with_context(|| format!("writing {}", temporary.display()))
+        .and_then(|()| {
+            fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))
+        });
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written?;
+    #[cfg(unix)]
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("syncing {}", parent.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

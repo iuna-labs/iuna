@@ -22,6 +22,7 @@ use tokio::{
 
 use crate::{
     adapters::{
+        consensus_local_state::write_atomically,
         consensus_p2p::{
             CompactBlock, Envelope, Hello, MAX_HELLO_PEERS, MAX_RELAY_CANDIDATES,
             MAX_RELAY_TICKETS, MAX_RELAY_TRANSACTIONS, MAX_WIRE_LINE_BYTES, decode_line,
@@ -303,7 +304,7 @@ pub fn seed_added_peers(path: &Path, peers: &[PeerAddress]) -> Result<()> {
         peers.to_vec()
     };
     let seeded = seeded.iter().map(PeerAddress::as_str).collect::<Vec<_>>();
-    fs::write(path, serde_json::to_vec_pretty(&seeded)?).context("writing bootstrap peers")
+    write_atomically(path, &serde_json::to_vec_pretty(&seeded)?).context("writing bootstrap peers")
 }
 
 pub fn load_added_peers(path: &Path) -> Result<Vec<PeerAddress>> {
@@ -488,10 +489,7 @@ impl PeerRegistry {
             .filter(|target| target.source == "added")
             .map(|target| target.address)
             .collect::<Vec<_>>();
-        let temporary = path.with_extension("json.tmp");
-        fs::write(&temporary, serde_json::to_vec_pretty(&added)?).context("writing saved peers")?;
-        fs::rename(&temporary, &path).context("replacing saved peers")?;
-        Ok(())
+        write_atomically(&path, &serde_json::to_vec_pretty(&added)?).context("writing saved peers")
     }
 
     fn update_target(&self, address: &PeerAddress, update: impl FnOnce(&mut PeerTarget)) {
