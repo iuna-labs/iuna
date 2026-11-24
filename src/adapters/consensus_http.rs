@@ -1020,7 +1020,7 @@ async fn public_wallet_activity(
         hex(&public_key),
         request.before_height,
     )
-    .await;
+    .await?;
     let node = state.node.lock().await;
     let chain = node.chain();
     let empty_block_outputs = std::collections::BTreeMap::new();
@@ -1132,12 +1132,19 @@ fn transaction_activity(
 type ProjectedInputValues = BTreeMap<String, BTreeMap<OutPoint, u64>>;
 
 /// The projected rewards and input values of one wallet page. They are read before the node lock,
-/// so SQLite never holds up the node.
+/// so SQLite never holds up the node. The newest page is refetched on every refresh, so it degrades
+/// to chain data alone rather than take the wallet's outputs down with it. An older page is
+/// fetched once, since the client moves its cursor past it, so there a failed read is an error.
 async fn projected_wallet_page(
     store: ConsensusUiStore,
     rewards_owner: String,
     before_height: Option<u64>,
-) -> (BTreeMap<String, WalletRewards>, ProjectedInputValues) {
+) -> std::result::Result<
+    (BTreeMap<String, WalletRewards>, ProjectedInputValues),
+    (StatusCode, Json<ApiError>),
+> {
+    // SQLite integers are signed; every height lies below this bound anyway.
+    let before_height = before_height.map(|height| height.min(i64::MAX as u64));
     let page = tokio::task::spawn_blocking(move || {
         let rewards = store.wallet_rewards_before(
             &rewards_owner,
@@ -1150,10 +1157,15 @@ async fn projected_wallet_page(
     .await
     .map_err(anyhow::Error::from)
     .and_then(|page| page);
-    page.unwrap_or_else(|error| {
-        // Screen data must not take the wallet's own outputs and transfers down with it.
+    page.or_else(|error| {
         eprintln!("reading projected wallet page failed: {error:#}");
-        Default::default()
+        if before_height.is_none() {
+            return Ok(Default::default());
+        }
+        Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "wallet history is temporarily unavailable",
+        ))
     })
 }
 
@@ -1331,7 +1343,7 @@ async fn wallet_activity(
         hex(&public_key),
         query.before_height,
     )
-    .await;
+    .await?;
     let mut node = state.node.lock().await;
     let owned = owners
         .iter()
