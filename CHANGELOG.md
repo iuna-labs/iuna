@@ -5,6 +5,33 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.29] - 2026-11-24
+
+### Fixed
+
+- stop wallet activity from replaying blocks under the node lock
+- stop untrusted Hellos from filling discovery for good
+- refuse unminable and unpayable objects before signature checks
+- report a failed wallet history read instead of an empty page
+- drop pending compact blocks that arrived another way
+- give a peer only a Hello-sized buffer until it sends one
+- pause after a failed accept instead of spinning
+- treat 6to4, NAT64 and Teredo peers like their real address
+- make node state files survive a crash or power loss
+- refuse to share a data directory with another running node
+- rebuild a damaged UI database instead of refusing to start
+- shut down gracefully on SIGTERM
+- keep an archived database together with its WAL
+- remember live blocks that fail full validation
+- reject rebound hosts on tokenless non-loopback listeners
+- do not mistake default public peers for this node
+
+### Performance
+
+- hash the shared signing digest prefix once per object
+- encode each block once when filling a range batch
+- keep wallet lookups off full chain and UTXO scans
+
 ## [0.6.28] - 2026-11-24
 
 ### Fixed
