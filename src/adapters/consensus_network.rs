@@ -575,6 +575,19 @@ impl PeerRegistry {
     }
 }
 
+/// Whether a peer's advertised endpoint is this node's own. Nodes without a configured public
+/// address all advertise `0.0.0.0:<port>`, so an unspecified address never identifies anyone.
+fn is_own_endpoint(own: Option<&PeerAddress>, advertised: Option<&str>) -> bool {
+    let (Some(own), Some(advertised)) = (own, advertised) else {
+        return false;
+    };
+    own.as_str() == advertised
+        && own
+            .as_str()
+            .parse::<SocketAddr>()
+            .map_or(true, |address| !address.ip().is_unspecified())
+}
+
 fn ip_is_publicly_discoverable(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
@@ -1064,9 +1077,7 @@ async fn run_connection(
                         peers.update_hello(&peer_key, hello);
                         let own = advertisement.get();
                         if hello.validate().is_ok() {
-                            if own.is_some()
-                                && hello.listen_addr.as_deref() == own.as_ref().map(PeerAddress::as_str)
-                            {
+                            if is_own_endpoint(own.as_ref(), hello.listen_addr.as_deref()) {
                                 bail!("connected to this node itself");
                             }
                             peers.verify_outbound(&peer_key);
@@ -1633,6 +1644,20 @@ mod tests {
             ["87.215.225.115:9444"],
             "a TCP connection without a valid Hello is not passed on"
         );
+    }
+
+    #[test]
+    fn only_a_specific_advertised_endpoint_identifies_this_node() {
+        let own = |address: &str| address.parse::<PeerAddress>().unwrap();
+        let public = own("87.215.225.115:9444");
+        assert!(is_own_endpoint(Some(&public), Some("87.215.225.115:9444")));
+        assert!(!is_own_endpoint(Some(&public), Some("87.215.225.116:9444")));
+        let named = own("node.example:9444");
+        assert!(is_own_endpoint(Some(&named), Some("node.example:9444")));
+        // Every public node without a configured address advertises this.
+        let default = own("0.0.0.0:9444");
+        assert!(!is_own_endpoint(Some(&default), Some("0.0.0.0:9444")));
+        assert!(!is_own_endpoint(None, Some("0.0.0.0:9444")));
     }
 
     #[test]
