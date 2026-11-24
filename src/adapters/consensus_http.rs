@@ -1015,23 +1015,12 @@ async fn public_wallet_activity(
             "public key does not belong to the requested wallet addresses",
         ));
     }
-    let rewards_owner = hex(&public_key);
-    let before_height = request.before_height;
-    let store = state.ui_store.clone();
-    let rewards = tokio::task::spawn_blocking(move || {
-        store.wallet_rewards_before(
-            &rewards_owner,
-            before_height,
-            WALLET_ACTIVITY_PAGE_HEARTBEATS,
-        )
-    })
-    .await
-    .map_err(anyhow::Error::from)
-    .and_then(|rewards| rewards)
-    .unwrap_or_else(|error| {
-        eprintln!("reading public wallet rewards failed: {error:#}");
-        Default::default()
-    });
+    let (rewards, projected_inputs) = projected_wallet_page(
+        state.ui_store.clone(),
+        hex(&public_key),
+        request.before_height,
+    )
+    .await;
     let node = state.node.lock().await;
     let chain = node.chain();
     let empty_block_outputs = std::collections::BTreeMap::new();
@@ -1042,7 +1031,7 @@ async fn public_wallet_activity(
             transaction_activity(
                 &owners,
                 transaction,
-                chain.tip(),
+                Some(chain.tip()),
                 &empty_block_outputs,
                 None,
                 None,
@@ -1058,6 +1047,7 @@ async fn public_wallet_activity(
         chain,
         &owners,
         &rewards,
+        &projected_inputs,
         request.before_height,
         WALLET_ACTIVITY_PAGE_HEARTBEATS,
     );
@@ -1076,7 +1066,7 @@ async fn public_wallet_activity(
 fn transaction_activity(
     owners: &BTreeSet<Address>,
     transaction: &Transaction,
-    state: &ConsensusState,
+    state: Option<&ConsensusState>,
     block_outputs: &std::collections::BTreeMap<OutPoint, u64>,
     height: Option<u64>,
     timestamp: Option<u64>,
@@ -1090,7 +1080,7 @@ fn transaction_activity(
                 .get(&input.previous_output)
                 .copied()
                 .or_else(|| {
-                    state
+                    state?
                         .utxos
                         .get(&input.previous_output)
                         .map(|output| output.value)
@@ -1137,12 +1127,75 @@ fn transaction_activity(
     })
 }
 
-/// One chronological wallet-activity page, newest first. States are replayed once from the oldest
-/// parent instead of once per block; this keeps pagination cheap beyond the in-memory window.
+/// Input values keyed by the block that spent them, as the projection resolved them when the
+/// block was applied.
+type ProjectedInputValues = BTreeMap<String, BTreeMap<OutPoint, u64>>;
+
+/// The projected rewards and input values of one wallet page. They are read before the node lock,
+/// so SQLite never holds up the node.
+async fn projected_wallet_page(
+    store: ConsensusUiStore,
+    rewards_owner: String,
+    before_height: Option<u64>,
+) -> (BTreeMap<String, WalletRewards>, ProjectedInputValues) {
+    let page = tokio::task::spawn_blocking(move || {
+        let rewards = store.wallet_rewards_before(
+            &rewards_owner,
+            before_height,
+            WALLET_ACTIVITY_PAGE_HEARTBEATS,
+        )?;
+        let details = store.block_details_before(before_height, WALLET_ACTIVITY_PAGE_HEARTBEATS)?;
+        anyhow::Ok((rewards, projected_input_values(&details)))
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|page| page);
+    page.unwrap_or_else(|error| {
+        // Screen data must not take the wallet's own outputs and transfers down with it.
+        eprintln!("reading projected wallet page failed: {error:#}");
+        Default::default()
+    })
+}
+
+fn projected_input_values(details: &[String]) -> ProjectedInputValues {
+    details
+        .iter()
+        .filter_map(|detail| serde_json::from_str::<BlockDetailView>(detail).ok())
+        .map(|detail| {
+            let transaction_inputs = detail
+                .ledger
+                .iter()
+                .flat_map(|ledger| ledger.transactions.iter())
+                .flat_map(|transaction| transaction.inputs.iter());
+            let ticket_inputs = detail
+                .tickets
+                .iter()
+                .flat_map(|ticket| ticket.inputs.iter());
+            let values = transaction_inputs
+                .chain(ticket_inputs)
+                .filter_map(|input| {
+                    Some((
+                        OutPoint {
+                            transaction_id: decode_hex_32(&input.transaction_id, "input").ok()?,
+                            output_index: input.output_index,
+                        },
+                        input.value?,
+                    ))
+                })
+                .collect();
+            (detail.block_hash, values)
+        })
+        .collect()
+}
+
+/// One chronological wallet-activity page, newest first. Remote clients can page to any height,
+/// so this never replays a block: input values come from a state still at hand, or else from the
+/// projection. Without either, a spend from the page is left out rather than priced wrongly.
 fn confirmed_wallet_activity(
     chain: &Chain,
     owners: &BTreeSet<Address>,
     rewards: &BTreeMap<String, WalletRewards>,
+    projected_inputs: &ProjectedInputValues,
     before_height: Option<u64>,
     page_heartbeats: u64,
 ) -> (u64, Vec<WalletActivityItem>, Option<u64>) {
@@ -1165,15 +1218,15 @@ fn confirmed_wallet_activity(
         return (scanned, Vec::new(), None);
     };
     let next_before_height = oldest.header.parent.map(|_| oldest.header.height);
-    let mut parent_state = oldest.header.parent.and_then(|hash| chain.state(&hash));
-    let mut items_by_block = Vec::with_capacity(blocks.len());
-    for block in blocks.iter().rev() {
+    let mut confirmed = Vec::new();
+    for block in blocks {
+        let block_hash = hex(&block.hash());
         let mut items = Vec::new();
-        if let Some(reward) = rewards.get(&hex(&block.hash())) {
+        if let Some(reward) = rewards.get(&block_hash) {
             if reward.heartbeat > 0 {
                 items.push(WalletActivityItem {
                     kind: "heartbeat_reward",
-                    id: hex(&block.hash()),
+                    id: block_hash.clone(),
                     heartbeat_height: Some(block.header.height),
                     timestamp: Some(block.header.timestamp),
                     amount: reward.heartbeat,
@@ -1183,7 +1236,7 @@ fn confirmed_wallet_activity(
             if reward.ledger > 0 {
                 items.push(WalletActivityItem {
                     kind: "ledger_reward",
-                    id: hex(&block.hash()),
+                    id: block_hash.clone(),
                     heartbeat_height: Some(block.header.height),
                     timestamp: Some(block.header.timestamp),
                     amount: reward.ledger,
@@ -1191,26 +1244,36 @@ fn confirmed_wallet_activity(
                 });
             }
         }
-        let mut block_outputs = std::collections::BTreeMap::new();
-        if let Some(state) = parent_state.as_deref() {
-            for transaction in block
-                .sidecar
-                .iter()
-                .flat_map(|sidecar| sidecar.transactions.iter())
-            {
-                if let Some(item) = transaction_activity(
-                    owners,
-                    transaction,
-                    state,
-                    &block_outputs,
-                    Some(block.header.height),
-                    Some(block.header.timestamp),
-                ) {
-                    items.push(item);
-                }
-                let transaction_id = transaction.id();
-                block_outputs.extend(transaction.outputs.iter().enumerate().map(
-                    |(index, output)| {
+        let parent_state = block
+            .header
+            .parent
+            .and_then(|parent| chain.kept_state(&parent));
+        let mut block_outputs = projected_inputs
+            .get(&block_hash)
+            .cloned()
+            .unwrap_or_default();
+        for transaction in block
+            .sidecar
+            .iter()
+            .flat_map(|sidecar| sidecar.transactions.iter())
+        {
+            if let Some(item) = transaction_activity(
+                owners,
+                transaction,
+                parent_state,
+                &block_outputs,
+                Some(block.header.height),
+                Some(block.header.timestamp),
+            ) {
+                items.push(item);
+            }
+            let transaction_id = transaction.id();
+            block_outputs.extend(
+                transaction
+                    .outputs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, output)| {
                         (
                             OutPoint {
                                 transaction_id,
@@ -1218,9 +1281,8 @@ fn confirmed_wallet_activity(
                             },
                             output.value,
                         )
-                    },
-                ));
-            }
+                    }),
+            );
         }
         items.extend(block.tickets.iter().filter_map(|ticket| {
             ticket_activity(
@@ -1230,13 +1292,8 @@ fn confirmed_wallet_activity(
                 Some(block.header.timestamp),
             )
         }));
-        items_by_block.push(items);
-        parent_state = match parent_state.as_deref() {
-            Some(state) => chain.child_state(state, block),
-            None => chain.state(&block.hash()),
-        };
+        confirmed.extend(items);
     }
-    let confirmed = items_by_block.into_iter().rev().flatten().collect();
     (scanned, confirmed, next_before_height)
 }
 
@@ -1268,26 +1325,13 @@ async fn wallet_activity(
     // A locked wallet's history stays private, like its balance in the status.
     let wallet = unlocked_wallet(&state)?;
     let public_key = wallet.public_key();
-    // Rewards are read before the node lock: SQLite must not hold up the node.
-    let store = state.ui_store.clone();
     let owners = wallet.owned_addresses();
-    let rewards_owner = hex(&public_key);
-    let before_height = query.before_height;
-    let rewards = tokio::task::spawn_blocking(move || {
-        store.wallet_rewards_before(
-            &rewards_owner,
-            before_height,
-            WALLET_ACTIVITY_PAGE_HEARTBEATS,
-        )
-    })
-    .await
-    .map_err(anyhow::Error::from)
-    .and_then(|rewards| rewards)
-    .unwrap_or_else(|error| {
-        // Screen data must not take the wallet's own outputs and transfers down with it.
-        eprintln!("reading wallet rewards failed: {error:#}");
-        Default::default()
-    });
+    let (rewards, projected_inputs) = projected_wallet_page(
+        state.ui_store.clone(),
+        hex(&public_key),
+        query.before_height,
+    )
+    .await;
     let mut node = state.node.lock().await;
     let owned = owners
         .iter()
@@ -1312,7 +1356,7 @@ async fn wallet_activity(
             transaction_activity(
                 &owners,
                 transaction,
-                chain.tip(),
+                Some(chain.tip()),
                 &empty_block_outputs,
                 None,
                 None,
@@ -1328,6 +1372,7 @@ async fn wallet_activity(
         chain,
         &owners,
         &rewards,
+        &projected_inputs,
         query.before_height,
         WALLET_ACTIVITY_PAGE_HEARTBEATS,
     );
@@ -3013,7 +3058,7 @@ mod tests {
         let item = transaction_activity(
             &BTreeSet::from([owner]),
             &transaction,
-            &state,
+            Some(&state),
             &std::collections::BTreeMap::new(),
             Some(1),
             Some(2),
@@ -3023,6 +3068,81 @@ mod tests {
         assert_eq!(item.kind, "sent");
         assert_eq!(item.amount, 610);
         assert_eq!(item.counterparty, Some(hex(&[7; 32])));
+    }
+
+    #[test]
+    fn old_spends_are_priced_from_projected_input_values_without_a_state() {
+        use crate::consensus::{Input, Output};
+
+        let public_key = [9; 32];
+        let owner = address_from_public_key(&public_key);
+        let detail = serde_json::json!({
+            "block_hash": hex(&[5; 32]),
+            "height": 3,
+            "rewards": {
+                "heartbeat": {
+                    "total": 0,
+                    "ledger_transaction_fees": 0,
+                    "ticket_inclusion_fees": 0,
+                    "expenditure": 0,
+                },
+                "ledger": null,
+            },
+            "tickets": [],
+            "ledger": {
+                "candidate_hash": hex(&[0; 32]),
+                "candidate_signature": null,
+                "deadline_fallback": false,
+                "winning_ticket_id": hex(&[0; 32]),
+                "lottery_heartbeat": hex(&[0; 32]),
+                "lottery_height": 0,
+                "slot": 0,
+                "transactions": [{
+                    "id": hex(&[6; 32]),
+                    "version": PROTOCOL_VERSION,
+                    "inputs": [{
+                        "transaction_id": hex(&[8; 32]),
+                        "output_index": 0,
+                        "public_key": hex(&public_key),
+                        "signature": "",
+                        "value": 1_000,
+                    }],
+                    "outputs": [],
+                    "total_output": 990,
+                    "fee": 10,
+                    "fee_split": null,
+                }],
+            },
+        });
+        let projected = projected_input_values(&[detail.to_string()]);
+        let block_outputs = &projected[&hex(&[5; 32])];
+        let transaction = Transaction {
+            version: PROTOCOL_VERSION,
+            inputs: vec![Input {
+                previous_output: OutPoint {
+                    transaction_id: [8; 32],
+                    output_index: 0,
+                },
+                public_key,
+                signature: Vec::new(),
+            }],
+            outputs: vec![Output {
+                owner: [7; 32],
+                value: 990,
+            }],
+        };
+
+        let item = transaction_activity(
+            &BTreeSet::from([owner]),
+            &transaction,
+            None,
+            block_outputs,
+            Some(3),
+            Some(4),
+        )
+        .unwrap();
+        assert_eq!(item.kind, "sent");
+        assert_eq!(item.amount, 1_000);
     }
 
     #[test]
@@ -3041,15 +3161,27 @@ mod tests {
             },
         )]);
 
-        let (scanned, newest, cursor) =
-            confirmed_wallet_activity(&chain, &BTreeSet::new(), &rewards, None, 1);
+        let (scanned, newest, cursor) = confirmed_wallet_activity(
+            &chain,
+            &BTreeSet::new(),
+            &rewards,
+            &BTreeMap::new(),
+            None,
+            1,
+        );
         assert_eq!(scanned, 1);
         assert_eq!(newest.len(), 1);
         assert_eq!(newest[0].kind, "heartbeat_reward");
         assert_eq!(cursor, Some(1));
 
-        let (scanned, older, cursor) =
-            confirmed_wallet_activity(&chain, &BTreeSet::new(), &rewards, cursor, 1);
+        let (scanned, older, cursor) = confirmed_wallet_activity(
+            &chain,
+            &BTreeSet::new(),
+            &rewards,
+            &BTreeMap::new(),
+            cursor,
+            1,
+        );
         assert_eq!(scanned, 1);
         assert!(older.is_empty());
         assert_eq!(cursor, None);

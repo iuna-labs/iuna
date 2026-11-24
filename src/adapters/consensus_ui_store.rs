@@ -367,6 +367,29 @@ impl ConsensusUiStore {
         })
     }
 
+    /// The stored `BlockDetailView` JSON of the page `wallet_rewards_before` reads. Wallet
+    /// history takes old input values from here instead of rebuilding a state.
+    pub fn block_details_before(
+        &self,
+        before_height: Option<u64>,
+        heartbeats: u64,
+    ) -> Result<Vec<String>> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "WITH boundary(value) AS ( \
+                   SELECT COALESCE(?1, COALESCE(MAX(height), -1) + 1) \
+                   FROM consensus_ui_heartbeats \
+                 ) \
+                 SELECT detail_json FROM consensus_ui_block_details, boundary \
+                 WHERE height < boundary.value AND height >= boundary.value - ?2",
+            )?;
+            statement
+                .query_map(params![before_height, heartbeats], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()
+                .context("reading block details")
+        })
+    }
+
     /// Rankings over the newest `heartbeats` projected Heartbeats, or the whole chain with `None`.
     /// Each list keeps the `limit` keys with the most blocks.
     pub fn leaderboards(&self, heartbeats: Option<u64>, limit: usize) -> Result<UiLeaderboards> {
