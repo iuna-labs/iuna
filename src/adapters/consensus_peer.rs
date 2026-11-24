@@ -209,6 +209,12 @@ impl PeerSession {
         block_hash: Hash,
         now: u64,
     ) -> Result<Vec<Envelope>> {
+        // The block may have arrived another way, such as range sync from another peer. Its entry
+        // would otherwise count against this honest peer's limit until the session ends.
+        if node.chain().block(&block_hash).is_some() {
+            self.pending_compact.remove(&block_hash);
+            return Ok(Vec::new());
+        }
         let Some(compact) = self.pending_compact.get(&block_hash).cloned() else {
             return Ok(Vec::new());
         };
@@ -835,6 +841,23 @@ mod tests {
         // This block needs nothing, so reconstructing it would have imported it.
         assert!(repeat.is_empty());
         assert_eq!(source.status().tip, parent.tip);
+    }
+
+    #[test]
+    fn a_compact_block_that_arrived_another_way_leaves_the_pending_set() {
+        let mut source = mined_node([71; 32], 1);
+        let tip = source.chain().block(&source.status().tip).unwrap().clone();
+        let mut session = PeerSession::default();
+        session
+            .pending_compact
+            .insert(tip.hash(), CompactBlock::from_block(&tip));
+
+        let responses = session
+            .retry_compact_blocks(&mut source, tip.header.timestamp)
+            .unwrap();
+
+        assert!(responses.is_empty());
+        assert!(session.pending_compact.is_empty());
     }
 
     #[test]
