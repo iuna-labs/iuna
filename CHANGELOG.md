@@ -5,9 +5,11 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.28] - 2026-11-24
+
 ### Fixed
 
-- restore bounded peer discovery through connected public nodes
+- restore bounded peer discovery
 
 ## [0.6.27] - 2026-11-23
 
