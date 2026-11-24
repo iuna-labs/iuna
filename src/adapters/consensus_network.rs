@@ -43,6 +43,9 @@ const INBOUND_ACCEPT_WINDOW: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The remote sends Hello after taking its node lock, so this allows for a busy node.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(20);
+/// A Hello carries a few short fields and at most eight peer addresses. Until one arrives a
+/// stranger gets this much buffer, not the full line limit meant for blocks.
+const MAX_HELLO_LINE_BYTES: usize = 16 * 1024;
 /// Longer than any quiet stretch of a live network; an outbound peer simply reconnects.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// For each chunk, so a slow but moving uplink can finish an 8 MiB block batch.
@@ -1030,7 +1033,11 @@ async fn run_connection(
                 )
                 .await?;
             }
-            line = read_bounded_line(&mut reader, &mut partial_line) => {
+            line = read_bounded_line(
+                &mut reader,
+                &mut partial_line,
+                if session.remote_hello().is_some() { MAX_WIRE_LINE_BYTES } else { MAX_HELLO_LINE_BYTES },
+            ) => {
                 let Some(line) = line? else {
                     return Ok(());
                 };
@@ -1281,6 +1288,7 @@ async fn write_envelope(writer: &mut (impl AsyncWrite + Unpin), envelope: &Envel
 async fn read_bounded_line(
     reader: &mut (impl AsyncBufRead + Unpin),
     line: &mut Vec<u8>,
+    limit: usize,
 ) -> Result<Option<Vec<u8>>> {
     loop {
         let buffer = reader.fill_buf().await.context("reading P2P envelope")?;
@@ -1291,7 +1299,7 @@ async fn read_bounded_line(
             .iter()
             .position(|byte| *byte == b'\n')
             .map_or(buffer.len(), |position| position + 1);
-        if line.len().saturating_add(consumed) > MAX_WIRE_LINE_BYTES {
+        if line.len().saturating_add(consumed) > limit {
             return Err(
                 io::Error::new(io::ErrorKind::InvalidData, "P2P line exceeds limit").into(),
             );
@@ -1764,15 +1772,21 @@ mod tests {
         let mut complete = BufReader::new(&b"hello\nrest"[..]);
         let mut line = Vec::new();
         assert_eq!(
-            read_bounded_line(&mut complete, &mut line).await.unwrap(),
+            read_bounded_line(&mut complete, &mut line, MAX_WIRE_LINE_BYTES)
+                .await
+                .unwrap(),
             Some(b"hello\n".to_vec())
         );
         assert_eq!(
-            read_bounded_line(&mut complete, &mut line).await.unwrap(),
+            read_bounded_line(&mut complete, &mut line, MAX_WIRE_LINE_BYTES)
+                .await
+                .unwrap(),
             Some(b"rest".to_vec())
         );
         assert_eq!(
-            read_bounded_line(&mut complete, &mut line).await.unwrap(),
+            read_bounded_line(&mut complete, &mut line, MAX_WIRE_LINE_BYTES)
+                .await
+                .unwrap(),
             None
         );
     }
@@ -1785,13 +1799,40 @@ mod tests {
         writer.write_all(b"hel").await.unwrap();
         tokio::select! {
             biased;
-            _ = read_bounded_line(&mut reader, &mut line) => panic!("the line is incomplete"),
+            _ = read_bounded_line(&mut reader, &mut line, MAX_WIRE_LINE_BYTES) => panic!("the line is incomplete"),
             () = tokio::time::sleep(Duration::from_millis(50)) => {}
         }
         writer.write_all(b"lo\n").await.unwrap();
         assert_eq!(
-            read_bounded_line(&mut reader, &mut line).await.unwrap(),
+            read_bounded_line(&mut reader, &mut line, MAX_WIRE_LINE_BYTES)
+                .await
+                .unwrap(),
             Some(b"hello\n".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_without_a_hello_gets_only_a_hello_sized_buffer() {
+        let bytes = vec![b'x'; MAX_HELLO_LINE_BYTES + 1];
+        let mut reader = BufReader::new(bytes.as_slice());
+        assert!(
+            read_bounded_line(&mut reader, &mut Vec::new(), MAX_HELLO_LINE_BYTES)
+                .await
+                .is_err()
+        );
+        let hello = serde_json::to_vec(&Envelope::Hello(
+            Hello::new(u64::MAX, [0xff; 32])
+                .with_listen_addr(Some("x".repeat(128)))
+                .with_known_peers(vec![
+                    "x".repeat(128);
+                    crate::adapters::consensus_p2p::MAX_HELLO_PEERS
+                ]),
+        ))
+        .unwrap();
+        assert!(
+            hello.len() * 2 < MAX_HELLO_LINE_BYTES,
+            "{} bytes",
+            hello.len()
         );
     }
 
@@ -1800,7 +1841,7 @@ mod tests {
         let bytes = vec![b'x'; MAX_WIRE_LINE_BYTES + 1];
         let mut reader = BufReader::new(bytes.as_slice());
         assert!(
-            read_bounded_line(&mut reader, &mut Vec::new())
+            read_bounded_line(&mut reader, &mut Vec::new(), MAX_WIRE_LINE_BYTES)
                 .await
                 .is_err()
         );
