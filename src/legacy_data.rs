@@ -28,42 +28,71 @@ pub(crate) fn archive(data_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
     let wallet_path = data_dir.join("wallet.json");
     let legacy_wallet = is_legacy_wallet(&wallet_path)?;
 
-    let mut paths = Vec::new();
+    let mut databases = Vec::new();
+    let mut files = Vec::new();
     if legacy_chain {
-        paths.extend([
-            chain_path,
-            data_dir.join("chain.sqlite3-wal"),
-            data_dir.join("chain.sqlite3-shm"),
-        ]);
+        databases.push(chain_path);
     }
     if legacy_wallet {
-        paths.extend([wallet_path, data_dir.join("wallet.password")]);
+        files.extend([wallet_path, data_dir.join("wallet.password")]);
     }
     // These filenames are exclusive to the old node. The new UI projection is `ui.sqlite3`,
     // while settings, peers, mining and mempool each have new dedicated representations.
-    paths.extend([
-        data_dir.join("ui_data.sqlite3"),
-        data_dir.join("ui_data.sqlite3-wal"),
-        data_dir.join("ui_data.sqlite3-shm"),
-        data_dir.join("config.json"),
-    ]);
+    databases.push(data_dir.join("ui_data.sqlite3"));
+    files.push(data_dir.join("config.json"));
 
     let mut moved = Vec::new();
-    for source in paths {
-        if !source.exists() {
-            continue;
+    for database in databases {
+        archive_database(&database, &mut moved)?;
+    }
+    for source in files {
+        if source.exists() {
+            let backup = available_backup_path(&source);
+            move_file(&source, &backup, &mut moved)?;
         }
-        let backup = available_backup_path(&source);
-        fs::rename(&source, &backup).with_context(|| {
-            format!(
-                "archiving legacy data {} as {}",
-                source.display(),
-                backup.display()
-            )
-        })?;
-        moved.push((source, backup));
     }
     Ok(moved)
+}
+
+/// A WAL file can hold committed transactions, and SQLite only finds it next to its database as
+/// `<database>-wal`. The companions therefore follow the database's backup name, and they move
+/// first: a WAL left behind would be replayed into the new database created at the old path.
+fn archive_database(database: &Path, moved: &mut Vec<(PathBuf, PathBuf)>) -> Result<()> {
+    let backup = available_backup_path(database);
+    for suffix in ["-wal", "-shm"] {
+        let companion = with_suffix(database, suffix);
+        if !companion.exists() {
+            continue;
+        }
+        let target = if database.exists() {
+            with_suffix(&backup, suffix)
+        } else {
+            available_backup_path(&companion)
+        };
+        move_file(&companion, &target, moved)?;
+    }
+    if database.exists() {
+        move_file(database, &backup, moved)?;
+    }
+    Ok(())
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn move_file(source: &Path, backup: &Path, moved: &mut Vec<(PathBuf, PathBuf)>) -> Result<()> {
+    fs::rename(source, backup).with_context(|| {
+        format!(
+            "archiving legacy data {} as {}",
+            source.display(),
+            backup.display()
+        )
+    })?;
+    moved.push((source.to_path_buf(), backup.to_path_buf()));
+    Ok(())
 }
 
 /// Whether the chain database belongs to the old protocol or to another network or genesis. Either
@@ -169,6 +198,36 @@ mod tests {
         );
         assert!(directory.path().join("wallet.json.backup").exists());
         assert!(directory.path().join("config.json.backup").exists());
+    }
+
+    #[test]
+    fn a_legacy_wal_stays_readable_with_its_archived_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let chain = directory.path().join("chain.sqlite3");
+        fs::write(directory.path().join("chain.sqlite3.backup"), "keep").unwrap();
+        let writer = Connection::open(&chain).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+                 CREATE TABLE chain_metadata (id INTEGER PRIMARY KEY);
+                 INSERT INTO chain_metadata (id) VALUES (7);",
+            )
+            .unwrap();
+        // The old node crashed: its last commit lives only in the WAL.
+        assert!(directory.path().join("chain.sqlite3-wal").exists());
+
+        let moved = archive(directory.path()).unwrap();
+        std::mem::forget(writer);
+
+        let backup = directory.path().join("chain.sqlite3.backup.1");
+        assert!(moved.iter().any(|(_, archived)| *archived == backup));
+        assert!(directory.path().join("chain.sqlite3.backup.1-wal").exists());
+        assert!(!directory.path().join("chain.sqlite3-wal").exists());
+        let id: i64 = Connection::open(&backup)
+            .unwrap()
+            .query_row("SELECT id FROM chain_metadata", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(id, 7);
     }
 
     fn current_chain(directory: &Path) -> PathBuf {
