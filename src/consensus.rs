@@ -147,6 +147,7 @@ impl SigningScope<'static> {
 
 /// Input values are signed so a wallet that was told a wrong value by its node produces an invalid
 /// signature, instead of silently paying the difference as a fee.
+#[cfg(test)]
 fn signing_digest(
     domain: &[u8],
     scope: SigningScope<'_>,
@@ -154,18 +155,44 @@ fn signing_digest(
     input_values: &[Amount],
     input_index: usize,
 ) -> Result<Hash> {
-    let mut out = Vec::new();
-    put_bytes(&mut out, scope.network_id.as_bytes());
-    out.extend_from_slice(scope.genesis_hash);
-    out.extend_from_slice(unsigned);
-    for value in input_values {
-        put_u64(&mut out, *value);
+    SigningDigests::new(domain, scope, unsigned, input_values).digest(input_index)
+}
+
+/// The signing digests of one object's inputs. Each is
+/// `tagged_hash(domain, scope || unsigned || input values || input index)`. Everything before the
+/// index is the same for every input and so is the length prefix, so that part is hashed once:
+/// hashing it per input made checking an object quadratic in its number of inputs.
+pub struct SigningDigests {
+    prefix: Sha256,
+}
+
+impl SigningDigests {
+    fn new(
+        domain: &[u8],
+        scope: SigningScope<'_>,
+        unsigned: &[u8],
+        input_values: &[Amount],
+    ) -> Self {
+        let mut shared = Vec::new();
+        put_bytes(&mut shared, scope.network_id.as_bytes());
+        shared.extend_from_slice(scope.genesis_hash);
+        shared.extend_from_slice(unsigned);
+        for value in input_values {
+            put_u64(&mut shared, *value);
+        }
+        let mut prefix = Sha256::new();
+        put_bytes_to_hasher(&mut prefix, domain);
+        prefix.update((shared.len() as u64 + 4).to_be_bytes());
+        prefix.update(&shared);
+        Self { prefix }
     }
-    put_u32(
-        &mut out,
-        u32::try_from(input_index).map_err(|_| ConsensusError::Arithmetic)?,
-    );
-    Ok(tagged_hash(domain, &out))
+
+    pub fn digest(&self, input_index: usize) -> Result<Hash> {
+        let index = u32::try_from(input_index).map_err(|_| ConsensusError::Arithmetic)?;
+        let mut hasher = self.prefix.clone();
+        hasher.update(index.to_be_bytes());
+        Ok(hasher.finalize().into())
+    }
 }
 
 /// The values of `points` in `utxos`, in order, as signing digests need them.
@@ -199,18 +226,27 @@ impl Transaction {
 
     /// `input_values` holds the value of each spent output, in input order.
     pub fn signing_digest(&self, input_index: usize, input_values: &[Amount]) -> Result<Hash> {
-        if input_index >= self.inputs.len() || input_values.len() != self.inputs.len() {
+        if input_index >= self.inputs.len() {
             return Err(ConsensusError::Invalid(
                 "transaction signing input does not match its inputs",
             ));
         }
-        signing_digest(
+        self.signing_digests(input_values)?.digest(input_index)
+    }
+
+    /// The digests of every input at once; signing or checking all inputs should use this.
+    pub fn signing_digests(&self, input_values: &[Amount]) -> Result<SigningDigests> {
+        if input_values.len() != self.inputs.len() {
+            return Err(ConsensusError::Invalid(
+                "transaction signing input does not match its inputs",
+            ));
+        }
+        Ok(SigningDigests::new(
             b"IUNA-TX-SIGN-v1",
             SigningScope::NETWORK,
             &self.canonical(false),
             input_values,
-            input_index,
-        )
+        ))
     }
 
     pub fn canonical_size(&self) -> usize {
@@ -261,18 +297,27 @@ impl TicketTransaction {
 
     /// `input_values` holds the value of each spent output, in input order.
     pub fn signing_digest(&self, input_index: usize, input_values: &[Amount]) -> Result<Hash> {
-        if input_index >= self.inputs.len() || input_values.len() != self.inputs.len() {
+        if input_index >= self.inputs.len() {
             return Err(ConsensusError::Invalid(
                 "ticket signing input does not match its inputs",
             ));
         }
-        signing_digest(
+        self.signing_digests(input_values)?.digest(input_index)
+    }
+
+    /// The digests of every input at once; signing or checking all inputs should use this.
+    pub fn signing_digests(&self, input_values: &[Amount]) -> Result<SigningDigests> {
+        if input_values.len() != self.inputs.len() {
+            return Err(ConsensusError::Invalid(
+                "ticket signing input does not match its inputs",
+            ));
+        }
+        Ok(SigningDigests::new(
             b"IUNA-TICKET-SIGN-v1",
             SigningScope::NETWORK,
             &self.canonical(false),
             input_values,
-            input_index,
-        )
+        ))
     }
 
     pub fn canonical_size(&self) -> usize {
@@ -2103,6 +2148,7 @@ fn check_ledger_batch(
                 .map(|input| &input.previous_output),
             "missing Ledger input",
         )?;
+        let digests = transaction.signing_digests(&values)?;
         let mut inputs = 0u64;
         for (index, input) in transaction.inputs.iter().enumerate() {
             if !spent.insert(input.previous_output.clone()) {
@@ -2114,11 +2160,7 @@ fn check_ledger_batch(
             if previous.owner != address_from_public_key(&input.public_key) {
                 return Err(ConsensusError::Invalid("Ledger input owner mismatch"));
             }
-            verify_signature(
-                &input.public_key,
-                &transaction.signing_digest(index, &values)?,
-                &input.signature,
-            )?;
+            verify_signature(&input.public_key, &digests.digest(index)?, &input.signature)?;
             inputs = checked_add(inputs, previous.value)?;
         }
         let outputs = transaction.outputs.iter().try_fold(0u64, |sum, output| {
@@ -2224,6 +2266,7 @@ fn check_ticket_batch(
             ticket.inputs.iter().map(|input| &input.previous_output),
             "missing ticket input",
         )?;
+        let digests = ticket.signing_digests(&values)?;
         for (index, input) in ticket.inputs.iter().enumerate() {
             if !spent.insert(input.previous_output.clone()) {
                 return Err(ConsensusError::Invalid("duplicate input in ticket batch"));
@@ -2234,11 +2277,7 @@ fn check_ticket_batch(
             if previous.owner != address_from_public_key(&input.public_key) {
                 return Err(ConsensusError::Invalid("ticket input owner mismatch"));
             }
-            verify_signature(
-                &input.public_key,
-                &ticket.signing_digest(index, &values)?,
-                &input.signature,
-            )?;
+            verify_signature(&input.public_key, &digests.digest(index)?, &input.signature)?;
         }
         let fee = ticket_fee(utxos, ticket).ok_or(ConsensusError::Invalid(
             "ticket inputs do not cover budget and change",
@@ -3667,6 +3706,28 @@ mod tests {
             transaction.signing_digest(0, &[7]).unwrap(),
             ticket.signing_digest(0, &[7]).unwrap()
         );
+    }
+
+    #[test]
+    fn shared_digest_prefix_matches_hashing_each_input_in_full() {
+        let unsigned = b"unsigned transaction bytes";
+        let values = [3, 1_000, u64::MAX];
+        let digests =
+            SigningDigests::new(b"IUNA-TX-SIGN-v1", SigningScope::NETWORK, unsigned, &values);
+        for index in 0..values.len() {
+            let mut full = Vec::new();
+            put_bytes(&mut full, NETWORK_ID.as_bytes());
+            full.extend_from_slice(&GENESIS_HASH);
+            full.extend_from_slice(unsigned);
+            for value in values {
+                put_u64(&mut full, value);
+            }
+            put_u32(&mut full, index as u32);
+            assert_eq!(
+                digests.digest(index).unwrap(),
+                tagged_hash(b"IUNA-TX-SIGN-v1", &full)
+            );
+        }
     }
 
     #[test]

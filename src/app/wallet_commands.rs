@@ -159,13 +159,13 @@ impl Wallet {
                 .map(|input| &input.previous_output),
             "missing Ledger input",
         )?;
+        let digests = transaction.signing_digests(&values)?;
         for index in 0..transaction.inputs.len() {
             let key = self
                 .key_for_public_key(&transaction.inputs[index].public_key)
                 .ok_or_else(|| anyhow::anyhow!("selected Ledger input key is unavailable"))?;
-            transaction.inputs[index].signature = self
-                .sign_with_key(&key, &transaction.signing_digest(index, &values)?)
-                .to_vec();
+            transaction.inputs[index].signature =
+                self.sign_with_key(&key, &digests.digest(index)?).to_vec();
         }
         validate_pending_transaction(state, &transaction)?;
         Ok(transaction)
@@ -286,13 +286,13 @@ impl Wallet {
             ticket.inputs.iter().map(|input| &input.previous_output),
             "missing ticket input",
         )?;
+        let digests = ticket.signing_digests(&values)?;
         for index in 0..ticket.inputs.len() {
             let key = self
                 .key_for_public_key(&ticket.inputs[index].public_key)
                 .ok_or_else(|| anyhow::anyhow!("selected ticket input key is unavailable"))?;
-            ticket.inputs[index].signature = self
-                .sign_with_key(&key, &ticket.signing_digest(index, &values)?)
-                .to_vec();
+            ticket.inputs[index].signature =
+                self.sign_with_key(&key, &digests.digest(index)?).to_vec();
         }
         validate_pending_ticket(state, &ticket)?;
         Ok(ticket)
