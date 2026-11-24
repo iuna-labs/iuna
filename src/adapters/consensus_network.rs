@@ -607,22 +607,32 @@ fn ip_is_publicly_discoverable(ip: IpAddr) -> bool {
                 || (segments[0] & 0xfe00) == 0xfc00
                 || (segments[0] & 0xffc0) == 0xfe80
                 || (segments[0] & 0xff00) == 0xff00
-                || (segments[0] == 0x2001 && segments[1] == 0x0db8))
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                // Teredo hides the real endpoint behind a relay and an obfuscated address.
+                || (segments[0] == 0x2001 && segments[1] == 0))
         }
     }
 }
 
+/// The IPv4 address an IPv6 address routes to: mapped, compatible, NAT64 (`64:ff9b::/96`) or
+/// 6to4 (`2002::/16`). Each must pass the IPv4 rules, or a private network is one prefix away.
 fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     if let Some(ip) = ip.to_ipv4_mapped() {
         return Some(ip);
     }
     let segments = ip.segments();
-    if segments[..6] != [0; 6] {
-        return None;
+    let from = |high: u16, low: u16| {
+        let [a, b] = high.to_be_bytes();
+        let [c, d] = low.to_be_bytes();
+        Some(Ipv4Addr::new(a, b, c, d))
+    };
+    if segments[0] == 0x2002 {
+        return from(segments[1], segments[2]);
     }
-    let [a, b] = segments[6].to_be_bytes();
-    let [c, d] = segments[7].to_be_bytes();
-    Some(Ipv4Addr::new(a, b, c, d))
+    if segments[..6] == [0; 6] || segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        return from(segments[6], segments[7]);
+    }
+    None
 }
 
 #[derive(Clone)]
@@ -1565,6 +1575,18 @@ mod tests {
             registry.add_target(address).is_err(),
             "the target list is bounded"
         );
+    }
+
+    #[test]
+    fn ipv6_prefixes_that_embed_ipv4_follow_the_ipv4_rules() {
+        let discoverable = |ip: &str| ip_is_publicly_discoverable(ip.parse().unwrap());
+        // 6to4 and NAT64 around 10.0.0.1 and around 87.215.225.115.
+        assert!(!discoverable("2002:a00:1::1"));
+        assert!(discoverable("2002:57d7:e173::1"));
+        assert!(!discoverable("64:ff9b::a00:1"));
+        assert!(discoverable("64:ff9b::57d7:e173"));
+        assert!(!discoverable("2001:0:4136:e378:8000:63bf:3fff:fdd2"));
+        assert!(discoverable("2a01:4f8::1"));
     }
 
     #[test]
