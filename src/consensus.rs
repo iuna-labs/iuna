@@ -753,7 +753,15 @@ impl Chain {
             return Err(ConsensusError::Invalid("incorrect ASERT target"));
         }
         if self.live_state(&parent_hash).is_some() {
-            self.index_block(block, now)
+            // Past these checks the hash pins the body and the clock has had its say, so a block
+            // that still fails is invalid for everyone. Remembering it means one proof of work
+            // buys one full validation, not one per resubmission.
+            self.check_deferrable(&block, now)?;
+            let result = self.index_block(block, now);
+            if result.is_err() {
+                self.remember_rejected(hash);
+            }
+            result
         } else {
             self.check_deferrable(&block, now)?;
             self.defer_block(block)
@@ -843,10 +851,7 @@ impl Chain {
                 // window follows the branch, which may be about to become the tip.
                 Ok(false) => self.prune_states(self.tip().height.min(branch_tip), &hash),
                 Err(error) => {
-                    if self.rejected.len() == MAX_REJECTED_BLOCKS {
-                        self.rejected.clear();
-                    }
-                    self.rejected.insert(hash);
+                    self.remember_rejected(hash);
                     // Whatever else waits here may build on the block that just failed.
                     self.deferred.clear();
                     self.deferred_bytes = 0;
@@ -856,6 +861,13 @@ impl Chain {
             }
         }
         Ok(activated)
+    }
+
+    fn remember_rejected(&mut self, hash: Hash) {
+        if self.rejected.len() == MAX_REJECTED_BLOCKS {
+            self.rejected.clear();
+        }
+        self.rejected.insert(hash);
     }
 
     fn index_block(&mut self, block: HeartbeatBlock, now: u64) -> Result<bool> {
@@ -2843,6 +2855,22 @@ mod tests {
         let early = now - MAX_FUTURE_TIME_SECS - 1;
         assert!(chain.submit(honest.clone(), early).is_err());
         assert_eq!(chain.submit(honest, now), Ok(false));
+    }
+
+    #[test]
+    fn a_live_block_that_fails_validation_is_not_validated_again() {
+        let (mut chain, history) = eight_blocks();
+        let bad = with_bad_root(&history[8], 52);
+        let timestamp = bad.header.timestamp;
+
+        assert!(matches!(
+            chain.submit(bad.clone(), timestamp),
+            Err(ConsensusError::Invalid(reason)) if reason != "block was already rejected"
+        ));
+        assert_eq!(
+            chain.submit(bad, timestamp),
+            Err(ConsensusError::Invalid("block was already rejected"))
+        );
     }
 
     #[test]
