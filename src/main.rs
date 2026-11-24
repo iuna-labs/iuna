@@ -123,7 +123,6 @@ async fn main() -> Result<()> {
     };
     let p2p_advertisement = P2pAdvertisement::new(initial_advertisement);
     let chain_store = ConsensusChainStore::open(options.data_dir.join("chain.sqlite3"))?;
-    let ui_store = ConsensusUiStore::open(options.data_dir.join("ui.sqlite3"))?;
     let wallet_path = options.data_dir.join("wallet.json");
     let node_instance_id = consensus_local_state::load_or_create_instance_id(&options.data_dir)?;
     let wallet_password = env::var("IUNA_WALLET_PASSWORD").ok();
@@ -168,10 +167,10 @@ async fn main() -> Result<()> {
         }
     }
     let node = Arc::new(Mutex::new(Node::open(chain_store)?));
-    let projected_tip = {
+    let (ui_store, projected_tip) = {
         let node = node.lock().await;
-        ui_store.project(node.chain())?;
-        node.status().tip
+        let ui_store = open_ui_store(&options.data_dir.join("ui.sqlite3"), node.chain())?;
+        (ui_store, node.status().tip)
     };
     let mempool_path = consensus_local_state::mempool_path(&options.data_dir);
     match consensus_local_state::load_mempool(&mempool_path) {
@@ -364,6 +363,53 @@ async fn main() -> Result<()> {
     }
     network.shutdown().await;
     result
+}
+
+/// Opens and projects the UI database. It only holds a projection of the chain, so a damaged
+/// file is deleted and built again instead of keeping the node from starting.
+fn open_ui_store(
+    path: &std::path::Path,
+    chain: &iuna::consensus::Chain,
+) -> Result<ConsensusUiStore> {
+    let open = || {
+        let store = ConsensusUiStore::open(path)?;
+        store.project(chain)?;
+        anyhow::Ok(store)
+    };
+    match open() {
+        Err(error) if is_corrupt_database(&error) => {
+            eprintln!("UI database is damaged and is rebuilt: {error:#}");
+            for suffix in ["", "-wal", "-shm"] {
+                let mut file = path.as_os_str().to_owned();
+                file.push(suffix);
+                match std::fs::remove_file(&file) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("removing {}", std::path::Path::new(&file).display())
+                        });
+                    }
+                }
+            }
+            open()
+        }
+        result => result,
+    }
+}
+
+fn is_corrupt_database(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            .is_some_and(|code| {
+                matches!(
+                    code,
+                    rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+                )
+            })
+    })
 }
 
 /// One node per data directory. A second one, such as a node left running by a desktop app that
@@ -867,6 +913,18 @@ mod tests {
             known_nodes("# comment\n\n  one.example:1  \n").unwrap(),
             ["one.example:1".parse::<PeerAddress>().unwrap()]
         );
+    }
+
+    #[test]
+    fn a_damaged_ui_database_is_rebuilt_instead_of_stopping_the_node() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ui.sqlite3");
+        std::fs::write(&path, vec![0x5a; 8192]).unwrap();
+        let chain = iuna::consensus::Chain::from_genesis().unwrap();
+
+        let store = open_ui_store(&path, &chain).unwrap();
+
+        assert_eq!(store.status().unwrap().unwrap().height, 0);
     }
 
     #[test]
