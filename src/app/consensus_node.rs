@@ -118,6 +118,20 @@ struct UsedAddressIndex {
     mempool_addresses: HashSet<Address>,
 }
 
+/// The fee a transaction pays if its signatures hold: its inputs in `tip` minus its outputs. It is
+/// cheap next to signature checks, so a transaction that could never pay the relay minimum is
+/// refused before them. `None` means validation will refuse it anyway.
+fn unverified_fee(tip: &ConsensusState, transaction: &Transaction) -> Option<u64> {
+    let inputs = transaction.inputs.iter().try_fold(0u64, |total, input| {
+        total.checked_add(tip.utxos.get(&input.previous_output)?.value)
+    })?;
+    let outputs = transaction
+        .outputs
+        .iter()
+        .try_fold(0u64, |total, output| total.checked_add(output.value))?;
+    inputs.checked_sub(outputs)
+}
+
 pub fn minimum_relay_fee(canonical_size: usize) -> u64 {
     (canonical_size as u64).div_ceil(1_000) * MIN_RELAY_FEE_PER_KB
 }
@@ -493,10 +507,19 @@ impl<R: ChainRepository> Node<R> {
             .iter()
             .map(|input| input.previous_output.clone())
             .collect::<Vec<_>>();
+        // A transaction that cannot fit in a Ledger block can never be mined, and its size is
+        // what signature checking costs, so it is refused before any of that work.
+        let size = transaction.canonical_size();
+        if size > MAX_LEDGER_SIDECAR_BYTES {
+            bail!("Ledger transaction is larger than a Ledger block");
+        }
         self.ensure_inputs_available(&inputs)?;
+        let minimum_fee = minimum_relay_fee(size);
+        if unverified_fee(self.chain.tip(), &transaction).is_some_and(|fee| fee < minimum_fee) {
+            bail!("Ledger transaction fee is below the relay minimum of {minimum_fee} units");
+        }
         let fee = validate_pending_transaction(self.chain.tip(), &transaction)
             .context("validating pending Ledger transaction")?;
-        let minimum_fee = minimum_relay_fee(transaction.canonical_size());
         if fee < minimum_fee {
             bail!("Ledger transaction fee is below the relay minimum of {minimum_fee} units");
         }
@@ -534,6 +557,9 @@ impl<R: ChainRepository> Node<R> {
             .iter()
             .map(|input| input.previous_output.clone())
             .collect::<Vec<_>>();
+        if ticket.canonical_size() > MAX_HEARTBEAT_BLOCK_BYTES {
+            bail!("mining ticket is larger than a Heartbeat block");
+        }
         self.ensure_inputs_available(&inputs)?;
         let fee = validate_pending_ticket(self.chain.tip(), &ticket)
             .context("validating pending mining ticket")?;
@@ -1235,6 +1261,33 @@ mod tests {
         assert_eq!(minimum_relay_fee(1), 1);
         assert_eq!(minimum_relay_fee(1_000), 1);
         assert_eq!(minimum_relay_fee(1_001), 2);
+    }
+
+    #[test]
+    fn unpayable_or_oversized_transactions_are_refused_before_signature_checks() {
+        let mut node = Node::open(MemoryRepository::default()).unwrap();
+        let mut free = signed_genesis_transaction(&node);
+        free.outputs[0].value = GENESIS_REWARD;
+        free.inputs[0].signature = vec![0; 64];
+        let error = node.submit_transaction(free).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("below the relay minimum"),
+            "{error:#}"
+        );
+
+        let mut oversized = signed_genesis_transaction(&node);
+        oversized.outputs = vec![
+            Output {
+                owner: [41; 32],
+                value: 1,
+            };
+            MAX_LEDGER_SIDECAR_BYTES / 40
+        ];
+        let error = node.submit_transaction(oversized).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("larger than a Ledger block"),
+            "{error:#}"
+        );
     }
 
     #[test]
