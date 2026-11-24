@@ -102,6 +102,10 @@ pub struct PeerTarget {
     /// `startup` for `--peer`, `added` for persisted UI peers, `discovered` for Hello endpoints.
     pub source: &'static str,
     pub connected: bool,
+    /// The current session received a valid Hello. Only then is the address worth passing on:
+    /// a bare TCP accept says nothing about what listens there.
+    #[serde(skip)]
+    pub verified: bool,
     pub last_attempt: Option<u64>,
     pub last_error: Option<String>,
 }
@@ -351,7 +355,12 @@ impl PeerRegistry {
         Ok(())
     }
 
-    fn discover_target(&self, address: PeerAddress) {
+    /// Learns a peer from a Hello. The node's own advertised address is never learned: a peer
+    /// that dialled this node passes it back, and a session with itself would hold two slots.
+    fn discover_target(&self, address: PeerAddress, own: Option<&PeerAddress>) {
+        if own == Some(&address) {
+            return;
+        }
         let Ok(commands) = self.command_sender() else {
             return;
         };
@@ -368,19 +377,47 @@ impl PeerRegistry {
         let _ = commands.send(PeerCommand::Add(address));
     }
 
-    fn discover_hello_peers(&self, hello: &Hello) {
+    fn discover_hello_peers(&self, hello: &Hello, own: Option<&PeerAddress>) {
         for address in hello.known_peers.iter().take(MAX_HELLO_PEERS) {
             let Ok(address) = address.parse::<SocketAddr>() else {
                 continue;
             };
             if address.port() > 0 && ip_is_publicly_discoverable(address.ip()) {
-                self.discover_target(address.into());
+                self.discover_target(address.into(), own);
             }
         }
     }
 
-    /// Only connected outbound targets have a listener we have successfully reached. Inbound
-    /// source ports are ephemeral and must never be advertised as peers.
+    /// A discovered peer is kept only while it works. Once a dial or session fails it is
+    /// dropped, so its slot goes to a peer another Hello names; a live one comes back that way.
+    /// Returns whether the target was dropped.
+    fn forget_discovered(&self, address: &PeerAddress) -> bool {
+        let mut targets = self.targets.write().expect("peer registry lock poisoned");
+        if targets
+            .get(address)
+            .is_none_or(|target| target.source != "discovered")
+        {
+            return false;
+        }
+        targets.remove(address);
+        drop(targets);
+        if let Ok(commands) = self.command_sender() {
+            let _ = commands.send(PeerCommand::Remove(address.clone()));
+        }
+        true
+    }
+
+    fn verify_outbound(&self, peer_key: &str) {
+        if let Some(address) = peer_key
+            .strip_prefix("outbound:")
+            .and_then(|address| address.parse::<PeerAddress>().ok())
+        {
+            self.update_target(&address, |target| target.verified = true);
+        }
+    }
+
+    /// Only outbound targets that answered with a valid Hello have a listener worth sharing.
+    /// Inbound source ports are ephemeral and must never be advertised as peers.
     fn known_peers_for_hello(&self, peer_key: &str) -> Vec<String> {
         let current_outbound = peer_key.strip_prefix("outbound:");
         self.targets
@@ -388,7 +425,7 @@ impl PeerRegistry {
             .expect("peer registry lock poisoned")
             .iter()
             .filter(|(address, target)| {
-                target.connected && current_outbound != Some(address.as_str())
+                target.verified && current_outbound != Some(address.as_str())
             })
             .take(MAX_HELLO_PEERS)
             .map(|(address, _)| address.to_string())
@@ -769,6 +806,7 @@ fn new_target(address: &PeerAddress, source: &'static str) -> PeerTarget {
         address: address.to_string(),
         source,
         connected: false,
+        verified: false,
         last_attempt: None,
         last_error: None,
     }
@@ -805,9 +843,9 @@ async fn run_supervisor(
             }
             Some(command) = commands.recv() => match command {
                 PeerCommand::Add(peer) => {
-                    outbound_tasks
-                        .entry(peer.clone())
-                        .or_insert_with(|| spawn_outbound(peer));
+                    if outbound_tasks.get(&peer).is_none_or(JoinHandle::is_finished) {
+                        outbound_tasks.insert(peer.clone(), spawn_outbound(peer));
+                    }
                 }
                 PeerCommand::Remove(peer) => {
                     if let Some(task) = outbound_tasks.remove(&peer) {
@@ -898,6 +936,7 @@ async fn run_outbound_peer(
                 context.peers.disconnect(&key);
                 context.peers.update_target(&peer, |target| {
                     target.connected = false;
+                    target.verified = false;
                     target.last_error = Some(match result {
                         Ok(()) => "connection closed".to_owned(),
                         Err(error) => format!("{error:#}"),
@@ -908,6 +947,9 @@ async fn run_outbound_peer(
                 target.last_attempt = Some(attempt);
                 target.last_error = Some(error.to_string());
             }),
+        }
+        if context.peers.forget_discovered(&peer) {
+            break;
         }
         tokio::select! {
             changed = shutdown.changed() => {
@@ -997,6 +1039,16 @@ async fn run_connection(
                 match &envelope {
                     Envelope::Hello(hello) => {
                         peers.update_hello(&peer_key, hello);
+                        let own = advertisement.get();
+                        if hello.validate().is_ok() {
+                            if own.is_some()
+                                && hello.listen_addr.as_deref() == own.as_ref().map(PeerAddress::as_str)
+                            {
+                                bail!("connected to this node itself");
+                            }
+                            peers.verify_outbound(&peer_key);
+                            peers.discover_hello_peers(hello, own.as_ref());
+                        }
                         if hello.validate().is_ok()
                             && let (Some(remote), Some(advertised)) = (discover_from, &hello.listen_addr)
                             && let Ok(advertised) = advertised.parse::<SocketAddr>()
@@ -1008,10 +1060,12 @@ async fn run_connection(
                                     && !remote_ip.is_unspecified()
                                     && (advertised_ip == remote_ip || advertised_ip.is_unspecified())
                                 {
-                                    peers.discover_target(SocketAddr::new(remote_ip, advertised.port()).into());
+                                    peers.discover_target(
+                                        SocketAddr::new(remote_ip, advertised.port()).into(),
+                                        own.as_ref(),
+                                    );
                                 }
                         }
-                        peers.discover_hello_peers(hello);
                     }
                     Envelope::Blocks { blocks } => {
                         if let Some(block) = blocks.iter().max_by_key(|block| block.header.height) {
@@ -1465,9 +1519,12 @@ mod tests {
         );
 
         for port in 0..MAX_DISCOVERED_PEER_TARGETS as u16 {
-            registry.discover_target(SocketAddr::from(([198, 51, 100, 8], 30_000 + port)).into());
+            registry.discover_target(
+                SocketAddr::from(([198, 51, 100, 8], 30_000 + port)).into(),
+                None,
+            );
         }
-        registry.discover_target(SocketAddr::from(([198, 51, 100, 8], 40_000)).into());
+        registry.discover_target(SocketAddr::from(([198, 51, 100, 8], 40_000)).into(), None);
         assert_eq!(
             registry
                 .targets()
@@ -1508,7 +1565,7 @@ mod tests {
             "peer.example:9444".to_owned(),
         ]);
 
-        registry.discover_hello_peers(&hello);
+        registry.discover_hello_peers(&hello, None);
 
         assert!(matches!(
             received.try_recv(),
@@ -1524,18 +1581,65 @@ mod tests {
         let registry = PeerRegistry::default();
         let current = "bootstrap.example:9444".parse::<PeerAddress>().unwrap();
         let learned = "87.215.225.115:9444".parse::<PeerAddress>().unwrap();
+        let unverified = "87.215.225.116:9444".parse::<PeerAddress>().unwrap();
         {
             let mut targets = registry.targets.write().unwrap();
             targets.insert(current.clone(), new_target(&current, "added"));
             targets.insert(learned.clone(), new_target(&learned, "discovered"));
-            targets.get_mut(&current).unwrap().connected = true;
-            targets.get_mut(&learned).unwrap().connected = true;
+            targets.get_mut(&current).unwrap().verified = true;
+            targets.get_mut(&learned).unwrap().verified = true;
+            targets.insert(unverified.clone(), new_target(&unverified, "discovered"));
+            targets.get_mut(&unverified).unwrap().connected = true;
         }
 
         assert_eq!(
             registry.known_peers_for_hello("outbound:bootstrap.example:9444"),
-            ["87.215.225.115:9444"]
+            ["87.215.225.115:9444"],
+            "a TCP connection without a valid Hello is not passed on"
         );
+    }
+
+    #[test]
+    fn hello_never_teaches_a_node_its_own_address() {
+        let registry = PeerRegistry::default();
+        let (commands, _received) = mpsc::unbounded_channel();
+        *registry.commands.write().unwrap() = Some(commands);
+        let own = "87.215.225.115:9444".parse::<PeerAddress>().unwrap();
+        let hello = Hello::new(0, crate::consensus::GENESIS_HASH)
+            .with_known_peers(vec![own.to_string(), "87.215.225.116:9444".to_owned()]);
+
+        registry.discover_hello_peers(&hello, Some(&own));
+
+        assert_eq!(
+            registry
+                .targets()
+                .iter()
+                .map(|target| target.address.as_str())
+                .collect::<Vec<_>>(),
+            ["87.215.225.116:9444"]
+        );
+    }
+
+    #[test]
+    fn a_failed_discovered_peer_frees_its_slot_and_configured_peers_stay() {
+        let registry = PeerRegistry::default();
+        let (commands, mut received) = mpsc::unbounded_channel();
+        *registry.commands.write().unwrap() = Some(commands);
+        let discovered = "87.215.225.115:9444".parse::<PeerAddress>().unwrap();
+        let configured = "bootstrap.example:9444".parse::<PeerAddress>().unwrap();
+        {
+            let mut targets = registry.targets.write().unwrap();
+            targets.insert(discovered.clone(), new_target(&discovered, "discovered"));
+            targets.insert(configured.clone(), new_target(&configured, "added"));
+        }
+
+        assert!(registry.forget_discovered(&discovered));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(PeerCommand::Remove(removed)) if removed == discovered
+        ));
+        assert!(!registry.forget_discovered(&configured));
+        assert_eq!(registry.targets().len(), 1);
     }
 
     #[tokio::test]

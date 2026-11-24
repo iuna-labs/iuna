@@ -294,11 +294,13 @@ node finds the network on its own; `--no-bootstrap-peers` turns that off for a
 private network. A node keeps at most `32` outbound
 peers.
 
-Hello messages also carry at most `8` currently reachable outbound peers. A node accepts only
-public `IP:port` entries from that list and dials them as temporary discovered targets. The list is
-refreshed every minute and discovered peers pass on their own reachable peers in turn, so the
-network can converge beyond its initial bootstrap connections. Discovered targets do not consume
-the operator's configured-peer allowance and are not written to `peers.json`.
+Hello messages also carry at most `8` outbound peers that answered with a valid Hello. A node
+accepts only public `IP:port` entries from that list, skips its own advertised address and dials
+them as temporary discovered targets. A discovered target is dropped as soon as a dial or session
+with it fails, which frees its slot for a peer another Hello names. The list is refreshed every
+minute and discovered peers pass on their own reachable peers in turn, so the network can converge
+beyond its initial bootstrap connections. Discovered targets do not consume the operator's
+configured-peer allowance and are not written to `peers.json`.
 
 Accepted Heartbeats are re-advertised to other peers by inventory, while newly
 accepted Ledger transactions and mining tickets are re-gossiped once. This lets
