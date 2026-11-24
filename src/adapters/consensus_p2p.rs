@@ -20,6 +20,8 @@ pub const MAX_RELAY_TRANSACTIONS: usize = 1_024;
 pub const MAX_RELAY_TICKETS: usize = 256;
 pub const MAX_RELAY_CANDIDATES: usize = 8;
 pub const MAX_SHORT_IDS: usize = 32_768;
+/// Public peer endpoints carried in Hello. Keeping this small bounds unsolicited discovery dials.
+pub const MAX_HELLO_PEERS: usize = 8;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Hello {
@@ -32,6 +34,10 @@ pub struct Hello {
     /// handshake compatible with nodes from before public-node settings returned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen_addr: Option<String>,
+    /// Reachable peers this node currently has an outbound session with. This optional field is
+    /// ignored by older nodes, so peer discovery can return without a protocol flag day.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_peers: Vec<String>,
 }
 
 impl Hello {
@@ -43,11 +49,17 @@ impl Hello {
             height,
             tip_hash,
             listen_addr: None,
+            known_peers: Vec::new(),
         }
     }
 
     pub fn with_listen_addr(mut self, listen_addr: Option<String>) -> Self {
         self.listen_addr = listen_addr;
+        self
+    }
+
+    pub fn with_known_peers(mut self, known_peers: Vec<String>) -> Self {
+        self.known_peers = known_peers;
         self
     }
 
@@ -57,6 +69,11 @@ impl Hello {
             || self.genesis_hash != GENESIS_HASH
         {
             bail!("peer does not speak the pinned {NETWORK_ID} protocol");
+        }
+        if self.known_peers.len() > MAX_HELLO_PEERS
+            || self.known_peers.iter().any(|address| address.len() > 128)
+        {
+            bail!("hello peer list exceeds limits");
         }
         Ok(())
     }
@@ -232,12 +249,23 @@ mod tests {
         });
         let decoded: Hello = serde_json::from_value(old).unwrap();
         assert_eq!(decoded.listen_addr, None);
+        assert!(decoded.known_peers.is_empty());
 
-        let announced = Hello::new(7, tip).with_listen_addr(Some("203.0.113.10:9444".to_owned()));
+        let announced = Hello::new(7, tip)
+            .with_listen_addr(Some("203.0.113.10:9444".to_owned()))
+            .with_known_peers(vec!["87.215.225.115:9444".to_owned()]);
         assert_eq!(
-            serde_json::to_value(announced).unwrap()["listen_addr"],
+            serde_json::to_value(&announced).unwrap()["listen_addr"],
             "203.0.113.10:9444"
         );
+        assert_eq!(
+            serde_json::to_value(announced).unwrap()["known_peers"][0],
+            "87.215.225.115:9444"
+        );
+
+        let oversized = Hello::new(7, tip)
+            .with_known_peers(vec!["8.8.8.8:9444".to_owned(); MAX_HELLO_PEERS + 1]);
+        assert!(oversized.validate().is_err());
     }
 
     #[test]
