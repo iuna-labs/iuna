@@ -118,6 +118,23 @@ struct UsedAddressIndex {
     mempool_addresses: HashSet<Address>,
 }
 
+/// Every address a block shows as used: its miner, its tickets' keys and change, and the outputs
+/// of its Ledger transactions.
+fn insert_block_addresses(addresses: &mut HashSet<Address>, block: &HeartbeatBlock) {
+    addresses.insert(address_from_public_key(&block.header.miner_public_key));
+    for ticket in &block.tickets {
+        addresses.insert(address_from_public_key(&ticket.mining_public_key));
+        addresses.extend(ticket.change.iter().map(|output| output.owner));
+    }
+    for transaction in block
+        .sidecar
+        .iter()
+        .flat_map(|sidecar| sidecar.transactions.iter())
+    {
+        addresses.extend(transaction.outputs.iter().map(|output| output.owner));
+    }
+}
+
 /// The fee a transaction pays if its signatures hold: its inputs in `tip` minus its outputs. It is
 /// cheap next to signature checks, so a transaction that could never pay the relay minimum is
 /// refused before them. `None` means validation will refuse it anyway.
@@ -437,28 +454,45 @@ impl<R: ChainRepository> Node<R> {
     pub fn address_used(&mut self, address: &Address) -> bool {
         let tip = self.chain.tip().tip;
         if self.used_address_index.tip != Some(tip) {
-            let mut addresses = HashSet::new();
+            // A tip that extends the indexed one only adds its new blocks. Anything else, a reorg
+            // or the first call, walks the whole chain again.
+            let indexed = self
+                .used_address_index
+                .tip
+                .and_then(|hash| self.chain.block(&hash))
+                .map(|block| (block.hash(), block.header.height));
+            let mut added = HashSet::new();
             let mut cursor = Some(tip);
+            let mut extends = false;
             while let Some(hash) = cursor {
+                if indexed.is_some_and(|(indexed, _)| indexed == hash) {
+                    extends = true;
+                    break;
+                }
                 let Some(block) = self.chain.block(&hash) else {
                     break;
                 };
-                addresses.insert(address_from_public_key(&block.header.miner_public_key));
-                for ticket in &block.tickets {
-                    addresses.insert(address_from_public_key(&ticket.mining_public_key));
-                    addresses.extend(ticket.change.iter().map(|output| output.owner));
+                if indexed.is_some_and(|(_, height)| block.header.height <= height) {
+                    break;
                 }
-                for transaction in block
-                    .sidecar
-                    .iter()
-                    .flat_map(|sidecar| sidecar.transactions.iter())
-                {
-                    addresses.extend(transaction.outputs.iter().map(|output| output.owner));
-                }
+                insert_block_addresses(&mut added, block);
                 cursor = block.header.parent;
             }
+            if extends {
+                self.used_address_index.chain_addresses.extend(added);
+            } else {
+                let mut addresses = HashSet::new();
+                let mut cursor = Some(tip);
+                while let Some(hash) = cursor {
+                    let Some(block) = self.chain.block(&hash) else {
+                        break;
+                    };
+                    insert_block_addresses(&mut addresses, block);
+                    cursor = block.header.parent;
+                }
+                self.used_address_index.chain_addresses = addresses;
+            }
             self.used_address_index.tip = Some(tip);
-            self.used_address_index.chain_addresses = addresses;
         }
         if self.used_address_index.mempool_generation != Some(self.mempool_generation) {
             let mut addresses = HashSet::new();
@@ -1223,6 +1257,31 @@ mod tests {
 
         assert_eq!(node.pending_transaction_count(), 0);
         assert!(!node.address_used(&recipient));
+    }
+
+    #[test]
+    fn address_usage_follows_new_blocks_and_reorgs() {
+        let mut node = Node::open(MemoryRepository::default()).unwrap();
+        let mut fork = Node::open(MemoryRepository::default()).unwrap();
+        assert!(!node.address_used(&address_from_public_key(&[44; 32])));
+
+        let first = GENESIS_TIMESTAMP + HEARTBEAT_TARGET_INTERVAL_SECS;
+        node.mine_next(first, [44; 32]).unwrap();
+        assert!(node.address_used(&address_from_public_key(&[44; 32])));
+        node.mine_next(first + HEARTBEAT_TARGET_INTERVAL_SECS, [45; 32])
+            .unwrap();
+        assert!(node.address_used(&address_from_public_key(&[45; 32])));
+
+        // A heavier branch from genesis replaces both blocks.
+        for (index, miner) in [[46; 32], [47; 32], [48; 32]].into_iter().enumerate() {
+            let timestamp = first + index as u64 * HEARTBEAT_TARGET_INTERVAL_SECS;
+            let block = fork.mine_next(timestamp, miner).unwrap();
+            node.submit_block(block, timestamp).unwrap();
+        }
+        assert_eq!(node.chain().tip().tip, fork.chain().tip().tip);
+        assert!(node.address_used(&address_from_public_key(&[48; 32])));
+        assert!(!node.address_used(&address_from_public_key(&[44; 32])));
+        assert!(!node.address_used(&address_from_public_key(&[45; 32])));
     }
 
     #[test]

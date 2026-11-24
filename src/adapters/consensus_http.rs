@@ -2230,17 +2230,16 @@ async fn status(State(state): State<ConsensusHttpState>) -> Json<OperatorStatus>
     let reserved_inputs = node.reserved_inputs();
     let wallet = state.wallet.read().expect("wallet state lock poisoned");
     let unlocked = wallet.unlocked.as_ref();
+    // The owner index is built once per tip; scanning every UTXO on each poll was not.
     let wallet_totals = unlocked.map(|wallet| {
-        let wallet_addresses = wallet.owned_addresses();
-        node.chain()
-            .tip()
-            .utxos
+        wallet
+            .owned_addresses()
             .iter()
-            .filter(|(_, output)| wallet_addresses.contains(&output.owner))
+            .flat_map(|owner| node.owned_outputs(owner))
             .fold(
                 (0, 0, 0, 0),
                 |(balance, spendable, outputs, spendable_outputs), (point, output)| {
-                    let reserved = reserved_inputs.contains(point);
+                    let reserved = reserved_inputs.contains(&point);
                     (
                         balance + output.value,
                         spendable + if reserved { 0 } else { output.value },
