@@ -662,9 +662,13 @@ type ApiErrorResponse = (StatusCode, Json<ApiError>);
 /// The operator router for a listener on `address`. On a loopback listener every request must
 /// name a loopback Host: a DNS-rebound page reaches the same socket but sends its own host name,
 /// and reads carry no token. Other listeners sit behind an ingress with its own host names.
+/// A listener that serves management without a token only answers requests naming a loopback
+/// host. Behind a published container port, such as the local testnet's, the browser still sends
+/// one; a DNS-rebound page does not, and would otherwise read the unlocked wallet's data.
 pub fn operator_router(state: ConsensusHttpState, address: SocketAddr) -> Router {
+    let local_only = address.ip().is_loopback() || state.trusted_management;
     let router = router(state);
-    if address.ip().is_loopback() {
+    if local_only {
         router.layer(middleware::from_fn(require_loopback_host))
     } else {
         router
@@ -4518,6 +4522,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn tokenless_management_on_a_container_listener_rejects_rebound_hosts() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = management_state(
+            &directory,
+            Arc::new(Wallet::from_seed([42; 32])),
+            "0123456789abcdef0123456789abcdef",
+        );
+        state.operator_token_hash = None;
+        state.trusted_management = true;
+        let application = operator_router(state, "0.0.0.0:8080".parse().unwrap());
+        let request = |host: &str| {
+            Request::get("/api/status")
+                .header(header::HOST, host)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let published = application
+            .clone()
+            .oneshot(request("127.0.0.1:8081"))
+            .await
+            .unwrap();
+        assert_eq!(published.status(), StatusCode::OK);
+        let rebound = application
+            .oneshot(request("evil.example:8081"))
+            .await
+            .unwrap();
+        assert_eq!(rebound.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]

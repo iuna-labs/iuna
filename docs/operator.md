@@ -166,8 +166,10 @@ set both headers; use an operator token on shared machines.
 `IUNA_INSECURE_OPERATOR_API=1` enables the same tokenless mode on a non-loopback
 `--http` address. It is meant only for the Docker Compose development network:
 any container on that bridge network can drive the nodes' wallets and mining.
-Compose publishes the HTTP ports only on `127.0.0.1`. Never set it on a node
-holding real funds.
+Compose publishes the HTTP ports only on `127.0.0.1`. Like a loopback listener,
+the node then answers only requests whose `Host` names a loopback address, so a
+DNS-rebound page cannot read the wallet either. Never set it on a node holding
+real funds.
 
 `POST /api/wallet` accepts one of five actions:
 
