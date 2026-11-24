@@ -54,6 +54,9 @@ const WRITE_CHUNK_BYTES: usize = 64 * 1024;
 /// Above this many tracked hosts, stale ones are swept. Below it the sweep is not worth its cost.
 const MAX_INBOUND_TRACKED_HOSTS: usize = 1_024;
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+/// Errors such as running out of file descriptors return at once, so the accept loop pauses
+/// instead of spinning and starving the supervisor's other work.
+const ACCEPT_ERROR_DELAY: Duration = Duration::from_millis(100);
 /// Refresh peer discovery on long-lived sessions as the connected topology changes.
 const PEER_ADVERTISEMENT_INTERVAL: Duration = Duration::from_secs(60);
 const OUTBOUND_CHANNEL_CAPACITY: usize = 1_024;
@@ -858,8 +861,13 @@ async fn run_supervisor(
                 }
             },
             accepted = listener.accept() => {
-                let Ok((stream, peer_addr)) = accepted else {
-                    continue;
+                let (stream, peer_addr) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        eprintln!("accepting a P2P connection failed: {error}");
+                        tokio::time::sleep(ACCEPT_ERROR_DELAY).await;
+                        continue;
+                    }
                 };
                 let Some(permit) = InboundLimiter::acquire(&inbound_limit, peer_addr.ip()) else {
                     continue;
