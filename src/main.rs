@@ -335,9 +335,7 @@ async fn main() -> Result<()> {
         p2p_advertisement,
     };
     let application = operator_router(http_state.clone(), options.http_addr);
-    let server = axum::serve(http_listener, application).with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
-    });
+    let server = axum::serve(http_listener, application).with_graceful_shutdown(shutdown_signal());
     let wallet_server = async move {
         match wallet_listener {
             Some(listener) => axum::serve(listener, public_wallet_router(http_state))
@@ -410,6 +408,26 @@ fn is_corrupt_database(error: &anyhow::Error) -> bool {
                 )
             })
     })
+}
+
+/// Ctrl-C, or SIGTERM as sent by Docker, systemd and process managers. Either way the node stops
+/// its tasks and saves the mempool before it exits.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+                return;
+            }
+            Err(error) => eprintln!("listening for SIGTERM failed: {error}"),
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// One node per data directory. A second one, such as a node left running by a desktop app that
