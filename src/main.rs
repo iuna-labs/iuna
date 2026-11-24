@@ -85,6 +85,7 @@ async fn main() -> Result<()> {
     };
     std::fs::create_dir_all(&options.data_dir)
         .with_context(|| format!("creating data directory {}", options.data_dir.display()))?;
+    let _data_dir_lock = lock_data_dir(&options.data_dir)?;
     for (source, backup) in legacy_data::archive(&options.data_dir)? {
         eprintln!(
             "legacy data: moved {} to {}",
@@ -363,6 +364,29 @@ async fn main() -> Result<()> {
     }
     network.shutdown().await;
     result
+}
+
+/// One node per data directory. A second one, such as a node left running by a desktop app that
+/// crashed, would write the same chain, mempool and settings files. The operating system releases
+/// the lock when the process exits, however it exits.
+fn lock_data_dir(data_dir: &std::path::Path) -> Result<std::fs::File> {
+    let path = data_dir.join("node.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => bail!(
+            "another IUNA node is already using the data directory {}",
+            data_dir.display()
+        ),
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(error).with_context(|| format!("locking {}", path.display()))
+        }
+    }
 }
 
 /// Writes the mempool to disk whenever it changed, at most every few seconds, so pending
@@ -843,6 +867,16 @@ mod tests {
             known_nodes("# comment\n\n  one.example:1  \n").unwrap(),
             ["one.example:1".parse::<PeerAddress>().unwrap()]
         );
+    }
+
+    #[test]
+    fn a_data_directory_serves_one_node_at_a_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let held = lock_data_dir(directory.path()).unwrap();
+        let error = lock_data_dir(directory.path()).unwrap_err();
+        assert!(error.to_string().contains("already using"), "{error:#}");
+        drop(held);
+        lock_data_dir(directory.path()).unwrap();
     }
 
     #[test]

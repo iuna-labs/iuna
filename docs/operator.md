@@ -286,6 +286,10 @@ grows with the logarithm of the height. They only speed up deep reorgs, and the
 node deletes and rebuilds them on every start. Blocks of a deep fork wait in
 memory, up to 256 MiB, until that branch has more work than the active chain.
 
+A node holds a lock on `node.lock` in its data directory while it runs. A second
+node started on the same directory exits at once with an error instead of
+writing the same files.
+
 `POST /api/peers` with `{ "action": "add", "address": "203.0.113.7:9444" }`
 starts dialling another outbound peer; `"remove"` stops dialling it and closes
 the session. Addresses are `IP:port` or `host:port`; a host name resolves on every connection attempt. Peers added
