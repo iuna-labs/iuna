@@ -11,7 +11,8 @@ use anyhow::{Context, Result, bail};
 use crate::{
     adapters::consensus_p2p::{
         CompactBlock, Envelope, Hello, MAX_BLOCKS_PER_MESSAGE, MAX_LOCATOR_HASHES,
-        MAX_RELAY_TRANSACTIONS, MAX_SHORT_IDS, encode_line, short_transaction_id,
+        MAX_RELAY_TRANSACTIONS, MAX_SHORT_IDS, MAX_WIRE_LINE_BYTES, encode_line,
+        short_transaction_id,
     },
     app::consensus_node::{ChainRepository, Node},
     consensus::{
@@ -373,21 +374,26 @@ fn transactions_for_short_ids<R: ChainRepository>(
         .collect()
 }
 
+/// As many of `blocks` as fit in one wire line. Each block is encoded once and the line size is
+/// summed: a JSON array is its items joined by commas. Re-encoding the growing batch for every
+/// block cost quadratic work under the node lock for any peer that asked.
 fn block_batch(blocks: Vec<HeartbeatBlock>) -> Result<Envelope> {
+    let mut size = encode_line(&Envelope::Blocks { blocks: Vec::new() })?.len();
     let mut current = Vec::new();
-    for block in blocks {
+    for block in blocks.into_iter().take(MAX_BLOCKS_PER_MESSAGE) {
+        let separator = usize::from(!current.is_empty());
+        let block_size = serde_json::to_vec(&block)
+            .context("encoding Heartbeat block")?
+            .len()
+            .saturating_add(separator);
+        if size.saturating_add(block_size) > MAX_WIRE_LINE_BYTES {
+            if current.is_empty() {
+                bail!("one Heartbeat block exceeds the P2P wire limit");
+            }
+            break;
+        }
+        size += block_size;
         current.push(block);
-        let candidate = Envelope::Blocks {
-            blocks: current.clone(),
-        };
-        if encode_line(&candidate).is_ok() {
-            continue;
-        }
-        current.pop().expect("the candidate contains the new block");
-        if current.is_empty() {
-            bail!("one Heartbeat block exceeds the P2P wire limit");
-        }
-        break;
     }
     Ok(Envelope::Blocks { blocks: current })
 }
@@ -520,9 +526,19 @@ mod tests {
         let mut block = Chain::from_genesis().unwrap().canonical_blocks()[0].clone();
         block.header.network = "x".repeat(3 * 1024 * 1024);
 
-        let batch = block_batch(vec![block.clone(), block.clone(), block]).unwrap();
+        let batch = block_batch(vec![block.clone(), block.clone(), block.clone()]).unwrap();
 
         assert!(encode_line(&batch).is_ok());
+        let Envelope::Blocks { blocks } = &batch else {
+            unreachable!("block_batch only creates a block envelope");
+        };
+        let third = Envelope::Blocks {
+            blocks: vec![block; blocks.len() + 1],
+        };
+        assert!(
+            encode_line(&third).is_err(),
+            "the batch is as full as it can be"
+        );
         let Envelope::Blocks { blocks } = batch else {
             unreachable!("block_batch only creates a block envelope");
         };
