@@ -2910,17 +2910,12 @@ fn authorize(
     Ok(())
 }
 
-fn is_local_origin(origin: &str) -> bool {
-    ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
-        .iter()
-        .any(|prefix| origin.starts_with(prefix))
-}
-
+/// Whether a browser `Origin` is the loopback page served from `host` itself. On port 80 the
+/// browser sends neither origin nor host with a port, so both compare without one.
 fn is_same_local_origin(origin: &str, host: &str) -> bool {
-    is_local_origin(origin)
-        && origin
-            .strip_prefix("http://")
-            .is_some_and(|authority| authority.eq_ignore_ascii_case(host))
+    origin.strip_prefix("http://").is_some_and(|authority| {
+        authority.eq_ignore_ascii_case(host) && is_loopback_host(authority)
+    })
 }
 
 async fn require_operator_auth(
@@ -4588,6 +4583,28 @@ mod tests {
             "",
         ] {
             assert!(!is_loopback_host(host), "{host}");
+        }
+    }
+
+    #[test]
+    fn local_management_origins_must_be_the_loopback_page_itself() {
+        for (origin, host) in [
+            ("http://127.0.0.1:8080", "127.0.0.1:8080"),
+            ("http://127.0.0.1", "127.0.0.1"),
+            ("http://localhost:8080", "LOCALHOST:8080"),
+            ("http://[::1]:8080", "[::1]:8080"),
+            ("http://127.0.0.2:8080", "127.0.0.2:8080"),
+        ] {
+            assert!(is_same_local_origin(origin, host), "{origin} {host}");
+        }
+        for (origin, host) in [
+            ("http://127.0.0.1:9000", "127.0.0.1:8080"),
+            ("https://127.0.0.1:8080", "127.0.0.1:8080"),
+            ("http://evil.example:8080", "evil.example:8080"),
+            ("http://192.168.1.5:8080", "192.168.1.5:8080"),
+            ("null", "127.0.0.1:8080"),
+        ] {
+            assert!(!is_same_local_origin(origin, host), "{origin} {host}");
         }
     }
 
