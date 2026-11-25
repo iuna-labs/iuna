@@ -315,7 +315,8 @@ accepts only public `IP:port` entries from that list, skips its own advertised a
 them as temporary discovered targets. Each Hello also carries a fresh random nonce per session: a
 node that receives the nonce of one of its own open sessions has dialled itself, closes that
 session and does not dial or learn that address again, even when it advertises `0.0.0.0`, until
-the operator adds or removes it as a peer. A discovered target is dropped as soon as a dial or session
+the operator adds or removes it as a peer. A discovered `IP:port` that an outbound session already
+reaches, for example through a configured host name, is not dialled a second time. A discovered target is dropped as soon as a dial or session
 with it fails, which frees its slot for a peer another Hello names. The list is refreshed every
 minute and discovered peers pass on their own reachable peers in turn, so the network can converge
 beyond its initial bootstrap connections. Discovered targets do not consume the operator's

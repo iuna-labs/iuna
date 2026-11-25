@@ -277,6 +277,10 @@ pub struct PeerRegistry {
     /// Targets whose Hello carried this node's nonce. A node advertising `0.0.0.0` cannot tell its
     /// public address from an endpoint string, so it learns it here and never dials it again.
     own_addresses: Arc<RwLock<BTreeSet<PeerAddress>>>,
+    /// The remote socket of each live outbound session and the target that dialled it. A host
+    /// name target and the `IP:port` a Hello names for it reach the same node; only one of them
+    /// keeps a session.
+    outbound_remotes: Arc<RwLock<HashMap<SocketAddr, PeerAddress>>>,
 }
 
 /// Reads the runtime-added peers saved by an earlier run. A missing file means none.
@@ -379,6 +383,51 @@ impl PeerRegistry {
             .contains(&nonce)
     }
 
+    /// Records that `peer` holds the outbound session to `remote`. A discovered target is refused,
+    /// returning the target already connected there, so the pair of nodes keeps one session; a
+    /// configured target is always allowed, as the operator asked for it.
+    fn claim_outbound_remote(&self, remote: SocketAddr, peer: &PeerAddress) -> Option<PeerAddress> {
+        let remote = canonical_socket(remote);
+        let discovered = self
+            .targets
+            .read()
+            .expect("peer registry lock poisoned")
+            .get(peer)
+            .is_some_and(|target| target.source == "discovered");
+        let mut remotes = self
+            .outbound_remotes
+            .write()
+            .expect("peer registry lock poisoned");
+        match remotes.get(&remote) {
+            Some(holder) if holder != peer && discovered => Some(holder.clone()),
+            Some(_) => None,
+            None => {
+                remotes.insert(remote, peer.clone());
+                None
+            }
+        }
+    }
+
+    fn release_outbound_remote(&self, remote: SocketAddr, peer: &PeerAddress) {
+        let remote = canonical_socket(remote);
+        let mut remotes = self
+            .outbound_remotes
+            .write()
+            .expect("peer registry lock poisoned");
+        if remotes.get(&remote) == Some(peer) {
+            remotes.remove(&remote);
+        }
+    }
+
+    fn has_outbound_session_to(&self, address: &PeerAddress) -> bool {
+        address.as_str().parse::<SocketAddr>().is_ok_and(|address| {
+            self.outbound_remotes
+                .read()
+                .expect("peer registry lock poisoned")
+                .contains_key(&canonical_socket(address))
+        })
+    }
+
     /// Forgets that `address` reached this node, when the operator adds or removes it again.
     fn forget_own_address(&self, address: &PeerAddress) {
         self.own_addresses
@@ -454,7 +503,10 @@ impl PeerRegistry {
     /// Learns a peer from a Hello. The node's own advertised address is never learned: a peer
     /// that dialled this node passes it back, and a session with itself would hold two slots.
     fn discover_target(&self, address: PeerAddress, own: Option<&PeerAddress>) {
-        if own == Some(&address) || self.is_own_address(&address) {
+        if own == Some(&address)
+            || self.is_own_address(&address)
+            || self.has_outbound_session_to(&address)
+        {
             return;
         }
         let Ok(commands) = self.command_sender() else {
@@ -678,6 +730,10 @@ fn is_own_endpoint(own: Option<&PeerAddress>, advertised: Option<&str>) -> bool 
             .as_str()
             .parse::<SocketAddr>()
             .map_or(true, |address| !address.ip().is_unspecified())
+}
+
+fn canonical_socket(address: SocketAddr) -> SocketAddr {
+    SocketAddr::new(address.ip().to_canonical(), address.port())
 }
 
 fn ip_is_publicly_discoverable(ip: IpAddr) -> bool {
@@ -1040,7 +1096,19 @@ async fn run_outbound_peer(
         }
         let attempt = unix_time_secs();
         match connect_peer(&peer).await {
-            Ok(stream) => {
+            Ok(stream) => 'session: {
+                let remote = stream.peer_addr().ok();
+                // Falls through to the tail below, which drops a discovered duplicate.
+                if let Some(holder) =
+                    remote.and_then(|remote| context.peers.claim_outbound_remote(remote, &peer))
+                {
+                    context.peers.update_target(&peer, |target| {
+                        target.last_attempt = Some(attempt);
+                        target.last_error =
+                            Some(format!("already connected to this node as {holder}"));
+                    });
+                    break 'session;
+                }
                 let key = format!("outbound:{peer}");
                 context.peers.connect(key.clone(), &peer, "outbound");
                 context.peers.update_target(&peer, |target| {
@@ -1058,6 +1126,9 @@ async fn run_outbound_peer(
                 )
                 .await;
                 context.peers.disconnect(&key);
+                if let Some(remote) = remote {
+                    context.peers.release_outbound_remote(remote, &peer);
+                }
                 context.peers.update_target(&peer, |target| {
                     target.connected = false;
                     target.verified = false;
@@ -1832,6 +1903,45 @@ mod tests {
         // Added by hand, it is tried again.
         registry.forget_own_address(&public.parse().unwrap());
         assert!(registry.own_addresses.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_node_reached_by_host_name_is_not_dialled_again_by_address() {
+        let registry = PeerRegistry::default();
+        let (commands, _received) = mpsc::unbounded_channel();
+        *registry.commands.write().unwrap() = Some(commands);
+        let named = "bootstrap.example:9444".parse::<PeerAddress>().unwrap();
+        let resolved: SocketAddr = "87.215.225.115:9444".parse().unwrap();
+        let by_address = PeerAddress::from(resolved);
+        registry
+            .targets
+            .write()
+            .unwrap()
+            .insert(named.clone(), new_target(&named, "added"));
+
+        assert_eq!(registry.claim_outbound_remote(resolved, &named), None);
+        // A Hello naming the same node by address does not add a second target.
+        registry.discover_target(by_address.clone(), None);
+        assert_eq!(registry.targets().len(), 1);
+
+        // One discovered before the named session connected is refused when it connects.
+        registry
+            .targets
+            .write()
+            .unwrap()
+            .insert(by_address.clone(), new_target(&by_address, "discovered"));
+        let mapped: SocketAddr = "[::ffff:87.215.225.115]:9444".parse().unwrap();
+        assert_eq!(
+            registry.claim_outbound_remote(mapped, &by_address),
+            Some(named.clone())
+        );
+
+        // Releasing someone else's claim changes nothing; the holder's own release frees it.
+        registry.release_outbound_remote(resolved, &by_address);
+        assert!(registry.has_outbound_session_to(&by_address));
+        registry.release_outbound_remote(resolved, &named);
+        assert!(!registry.has_outbound_session_to(&by_address));
+        assert_eq!(registry.claim_outbound_remote(resolved, &by_address), None);
     }
 
     #[test]
