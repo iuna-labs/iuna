@@ -76,10 +76,9 @@ impl PeerSession {
                 Ok(responses)
             }
             Envelope::Inventory { block_hashes } => {
-                if block_hashes
-                    .iter()
-                    .all(|hash| node.chain().block(hash).is_some())
-                {
+                // A deferred side branch counts as known, or every Hello from a peer on it
+                // would walk the whole branch again for duplicates.
+                if block_hashes.iter().all(|hash| node.chain().has_block(hash)) {
                     return Ok(Vec::new());
                 }
                 Ok(vec![self.block_request(node)])

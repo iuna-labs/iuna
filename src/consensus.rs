@@ -729,6 +729,12 @@ impl Chain {
         self.blocks.get(hash)
     }
 
+    /// Whether this chain already holds `hash`, indexed or deferred until its branch outweighs the
+    /// tip. Either way, fetching it again from a peer would only return a duplicate.
+    pub fn has_block(&self, hash: &Hash) -> bool {
+        self.blocks.contains_key(hash) || self.deferred.contains_key(hash)
+    }
+
     /// Validate and index a block. Returns true only when strict additional chainwork makes this
     /// branch active; equal-work branches within the state window remain available but never
     /// replace the current tip. A block whose parent lies behind that window, because its state
@@ -2765,6 +2771,9 @@ mod tests {
         assert_eq!(chain.submit(block, timestamp), Ok(false));
 
         assert!(chain.block(&hash).is_none());
+        // Held, so a peer announcing it is not asked for it again.
+        assert!(chain.has_block(&hash));
+        assert!(!chain.has_block(&[0xee; 32]));
         assert_eq!(chain.tip().tip, history[8].tip);
     }
 
