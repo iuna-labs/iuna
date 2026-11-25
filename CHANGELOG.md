@@ -5,6 +5,35 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.30] - 2026-11-25
+
+### Added
+
+- animate how the chains and ticket lottery work
+
+### Fixed
+
+- cap pending Ledger transactions by bytes
+- recognize a session with this node by a Hello nonce
+- reuse an empty change address instead of running out
+- refuse unknown host names on non-loopback listeners
+- find wallet activity pages by height
+- harden session and peer bookkeeping edge cases
+- save the mempool last and let the desktop app stop the node
+- accept the loopback management page on port 80
+- do not fetch a deferred side branch again
+- use a fresh Hello nonce per session
+- address review notes on shutdown, change reuse and host refusal
+- keep one outbound session per remote node
+
+### Documentation
+
+- correct the future-drift bound for fork blocks
+
+### Maintenance
+
+- run the live TCP tests before each commit
+
 ## [0.6.29] - 2026-11-24
 
 ### Fixed
