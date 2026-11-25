@@ -124,7 +124,7 @@ Like Bitcoin's `powLimit` (difficulty 1), the genesis target is also the easiest
 - a timestamp must be greater than the median of the last `11` block timestamps;
 - it may be at most `10 minutes` ahead of the validating node's clock.
 
-Abusing that future drift can move one target by at most `2^(600 / τ)`, about `12%`, and the next solvetime reverses it.
+On a block that extends a recent tip, abusing that future drift can move the next target by at most `2^(600 / τ)`, about `12%`, and the next solvetime reverses it. A block on a fork from an older block is different: its solvetime also counts how old that parent is, so the target of the block after it can be much easier, about `2^(age / τ)`. A fork from a block four hours back gets roughly a sixteenfold easier target. This does not help an attacker win the chain, because fork choice counts work and each of those blocks carries correspondingly less of it. It does make side-branch blocks cheaper to produce. A node fully validates such blocks only when they fork within its recent state window; deeper forks wait in a bounded buffer until their branch outweighs the tip.
 
 ### Fork Choice
 
