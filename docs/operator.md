@@ -123,8 +123,9 @@ IUNA`. Free transactions are refused instead of filling the mempool, before
 their signatures are checked. A transaction larger than a Ledger block or a
 ticket larger than a Heartbeat block is refused outright, since it could never
 be mined. A full
-mempool (`10,000` transactions or `4,096` tickets) only admits an object that
-pays more per byte than its cheapest entry, which it then replaces. This is
+mempool (`10,000` transactions or `32 MiB` of transactions, or `4,096`
+tickets) only admits an object that pays more per byte than the cheapest
+entries it then replaces to make room. This is
 policy, not consensus: a block containing a cheaper transaction is still
 valid. Per-IP rate limiting belongs in the ingress in front of these routes.
 

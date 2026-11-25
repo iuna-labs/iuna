@@ -21,6 +21,9 @@ use crate::consensus::{
 };
 
 const MAX_PENDING_LEDGER_TRANSACTIONS: usize = 10_000;
+/// The pool's canonical bytes, 64 full Ledger blocks. Without it the count alone let a pool of
+/// block-sized transactions reach about 5 GiB, which is cloned and saved under the node lock.
+const MAX_PENDING_LEDGER_BYTES: usize = 64 * MAX_LEDGER_SIDECAR_BYTES;
 /// Mempool relay policy, not consensus: one unit per started 1,000 canonical bytes, so a typical
 /// transaction needs at least 1 unit and free transactions cannot fill the mempool.
 pub const MIN_RELAY_FEE_PER_KB: u64 = 1;
@@ -60,6 +63,8 @@ pub struct Node<R> {
     /// The fee and canonical size of each pending transaction and ticket, for evicting the
     /// cheapest per byte when a pool is full without encoding every entry again.
     pending_fees: BTreeMap<Hash, (u64, usize)>,
+    /// Canonical bytes of all pending Ledger transactions, kept with `pending_transactions`.
+    pending_transaction_bytes: usize,
     pending_candidates: BTreeMap<(Hash, u64, Hash), Sidecar>,
     reserved_inputs: BTreeSet<OutPoint>,
     owner_index: OwnerIndex,
@@ -261,6 +266,7 @@ impl<R: ChainRepository> Node<R> {
             pending_transactions: BTreeMap::new(),
             pending_tickets: BTreeMap::new(),
             pending_fees: BTreeMap::new(),
+            pending_transaction_bytes: 0,
             pending_candidates: BTreeMap::new(),
             reserved_inputs: BTreeSet::new(),
             owner_index: OwnerIndex::default(),
@@ -557,25 +563,34 @@ impl<R: ChainRepository> Node<R> {
         if fee < minimum_fee {
             bail!("Ledger transaction fee is below the relay minimum of {minimum_fee} units");
         }
-        if self.pending_transactions.len() >= MAX_PENDING_LEDGER_TRANSACTIONS {
-            let cheapest = cheapest_below(
-                self.pending_transactions.keys(),
-                &self.pending_fees,
-                (fee, transaction.canonical_size()),
-            )
-            .context("Ledger transaction mempool is full of transactions paying at least as much per byte")?;
+        let evictions = evictions_for(
+            self.pending_transactions.keys(),
+            &self.pending_fees,
+            (fee, size),
+            Budget {
+                count: self.pending_transactions.len(),
+                max_count: MAX_PENDING_LEDGER_TRANSACTIONS,
+                bytes: self.pending_transaction_bytes,
+                max_bytes: MAX_PENDING_LEDGER_BYTES,
+            },
+        )
+        .context(
+            "Ledger transaction mempool is full of transactions paying at least as much per byte",
+        )?;
+        for cheapest in evictions {
             let evicted = self
                 .pending_transactions
                 .remove(&cheapest)
                 .expect("cheapest entry is pending");
+            self.pending_transaction_bytes -= evicted.canonical_size();
             self.release(
                 &cheapest,
                 evicted.inputs.iter().map(|input| &input.previous_output),
             );
         }
         self.reserved_inputs.extend(inputs);
-        self.pending_fees
-            .insert(id, (fee, transaction.canonical_size()));
+        self.pending_fees.insert(id, (fee, size));
+        self.pending_transaction_bytes += size;
         self.pending_transactions.insert(id, transaction);
         self.mempool_generation += 1;
         Ok(fee)
@@ -597,13 +612,19 @@ impl<R: ChainRepository> Node<R> {
         self.ensure_inputs_available(&inputs)?;
         let fee = validate_pending_ticket(self.chain.tip(), &ticket)
             .context("validating pending mining ticket")?;
-        if self.pending_tickets.len() >= MAX_PENDING_TICKETS {
-            let cheapest = cheapest_below(
-                self.pending_tickets.keys(),
-                &self.pending_fees,
-                (fee, ticket.canonical_size()),
-            )
-            .context("ticket mempool is full of tickets paying at least as much per byte")?;
+        let evictions = evictions_for(
+            self.pending_tickets.keys(),
+            &self.pending_fees,
+            (fee, ticket.canonical_size()),
+            Budget {
+                count: self.pending_tickets.len(),
+                max_count: MAX_PENDING_TICKETS,
+                bytes: 0,
+                max_bytes: usize::MAX,
+            },
+        )
+        .context("ticket mempool is full of tickets paying at least as much per byte")?;
+        for cheapest in evictions {
             let evicted = self
                 .pending_tickets
                 .remove(&cheapest)
@@ -926,6 +947,12 @@ impl<R: ChainRepository> Node<R> {
                 .map(|fee| fees.insert(*id, (fee, ticket.canonical_size())))
                 .is_ok()
         });
+        self.pending_transaction_bytes = self
+            .pending_transactions
+            .keys()
+            .filter_map(|id| fees.get(id))
+            .map(|(_, size)| size)
+            .sum();
         self.pending_fees = fees;
         let mut candidates = std::mem::take(&mut self.pending_candidates);
         candidates.retain(|_, candidate| self.pending_candidate_fee(candidate).is_ok());
@@ -963,31 +990,68 @@ fn fallback_sidecar(winner: &Winner) -> Sidecar {
     }
 }
 
-/// Among `ids`, the pending entry paying the least per byte, if `candidate` (fee, size) pays
-/// strictly more. Ties go to the higher id, so eviction does not depend on arrival order.
-fn cheapest_below<'a>(
+/// A pool's current use and limits.
+struct Budget {
+    count: usize,
+    max_count: usize,
+    bytes: usize,
+    max_bytes: usize,
+}
+
+/// The entries to evict from a pool using `budget` so `candidate` (fee, size) fits: the cheapest
+/// per byte first, each paying strictly less per byte than the candidate. `None` when the
+/// candidate cannot fit that way, so nothing is evicted for an object that is then refused. Ties
+/// go to the higher id, so eviction does not depend on arrival order.
+fn evictions_for<'a>(
     ids: impl IntoIterator<Item = &'a Hash>,
     costs: &BTreeMap<Hash, (u64, usize)>,
     candidate: (u64, usize),
-) -> Option<Hash> {
+    budget: Budget,
+) -> Option<Vec<Hash>> {
+    let fits = |count: usize, bytes: usize| {
+        count < budget.max_count
+            && bytes
+                .checked_add(candidate.1)
+                .is_some_and(|total| total <= budget.max_bytes)
+    };
+    let (mut count, mut bytes) = (budget.count, budget.bytes);
+    if fits(count, bytes) {
+        return Some(Vec::new());
+    }
+    if candidate.1 > budget.max_bytes {
+        return None;
+    }
     let rate = |(fee, bytes): (u64, usize)| (u128::from(fee), bytes.max(1) as u128);
     // a pays less per byte than b when fee_a * size_b < fee_b * size_a.
     let less = |(left_fee, left_size): (u128, u128), (right_fee, right_size): (u128, u128)| {
         left_fee * right_size < right_fee * left_size
     };
-    let (id, cheapest) = ids
+    let candidate_rate = rate(candidate);
+    let mut cheaper = ids
         .into_iter()
-        .map(|id| (*id, rate(costs.get(id).copied().unwrap_or((0, 1)))))
-        .min_by(|(left_id, left), (right_id, right)| {
-            if less(*left, *right) {
-                std::cmp::Ordering::Less
-            } else if less(*right, *left) {
-                std::cmp::Ordering::Greater
-            } else {
-                right_id.cmp(left_id)
-            }
-        })?;
-    less(cheapest, rate(candidate)).then_some(id)
+        .map(|id| (*id, costs.get(id).copied().unwrap_or((0, 1))))
+        .filter(|(_, cost)| less(rate(*cost), candidate_rate))
+        .collect::<Vec<_>>();
+    cheaper.sort_by(|(left_id, left), (right_id, right)| {
+        let (left, right) = (rate(*left), rate(*right));
+        if less(left, right) {
+            std::cmp::Ordering::Less
+        } else if less(right, left) {
+            std::cmp::Ordering::Greater
+        } else {
+            right_id.cmp(left_id)
+        }
+    });
+    let mut evicted = Vec::new();
+    for (id, (_, size)) in cheaper {
+        evicted.push(id);
+        count -= 1;
+        bytes = bytes.saturating_sub(size);
+        if fits(count, bytes) {
+            return Some(evicted);
+        }
+    }
+    None
 }
 
 struct Template {
@@ -1535,6 +1599,16 @@ mod tests {
         );
     }
 
+    /// A pool holding `count` entries that is full by count.
+    fn full(count: usize) -> Budget {
+        Budget {
+            count,
+            max_count: count,
+            bytes: 0,
+            max_bytes: usize::MAX,
+        }
+    }
+
     #[test]
     fn a_full_mempool_evicts_only_for_a_higher_fee_per_byte() {
         // 10 units over 100 bytes, 10 over 200 and 30 over 100: [2; 32] pays least per byte.
@@ -1545,19 +1619,68 @@ mod tests {
         ]);
         let ids = [[1; 32], [2; 32], [3; 32]];
 
-        assert_eq!(cheapest_below(&ids, &costs, (6, 100)), Some([2; 32]));
-        assert_eq!(cheapest_below(&ids, &costs, (5, 100)), None);
-        assert_eq!(cheapest_below(&ids, &costs, (10, 200)), None);
+        assert_eq!(
+            evictions_for(&ids, &costs, (6, 100), full(3)),
+            Some(vec![[2; 32]])
+        );
+        assert_eq!(evictions_for(&ids, &costs, (5, 100), full(3)), None);
+        assert_eq!(evictions_for(&ids, &costs, (10, 200), full(3)), None);
         // Only the given pool is scanned.
-        assert_eq!(cheapest_below(&[[1; 32]], &costs, (11, 100)), Some([1; 32]));
+        assert_eq!(
+            evictions_for(&[[1; 32]], &costs, (11, 100), full(1)),
+            Some(vec![[1; 32]])
+        );
         // Equal rates evict the higher id, whatever arrived first.
         let tied = BTreeMap::from([
             ([1; 32], (10, 100)),
             ([2; 32], (20, 200)),
             ([3; 32], (30, 100)),
         ]);
-        assert_eq!(cheapest_below(&ids, &tied, (11, 100)), Some([2; 32]));
-        assert_eq!(cheapest_below(&[], &costs, (1, 1)), None);
+        assert_eq!(
+            evictions_for(&ids, &tied, (11, 100), full(3)),
+            Some(vec![[2; 32]])
+        );
+        assert_eq!(evictions_for(&[], &costs, (1, 1), full(0)), None);
+        // A pool with room evicts nothing.
+        let room = Budget {
+            max_count: 4,
+            ..full(3)
+        };
+        assert_eq!(evictions_for(&ids, &costs, (1, 1), room), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_mempool_full_by_bytes_evicts_until_the_candidate_fits() {
+        let costs = BTreeMap::from([
+            ([1; 32], (10, 100)),
+            ([2; 32], (10, 200)),
+            ([3; 32], (30, 100)),
+        ]);
+        let ids = [[1; 32], [2; 32], [3; 32]];
+        let budget = |max_bytes| Budget {
+            count: 3,
+            max_count: 10,
+            bytes: 400,
+            max_bytes,
+        };
+
+        // 250 more bytes in a 500-byte pool free 150: [2; 32] alone frees 200.
+        assert_eq!(
+            evictions_for(&ids, &costs, (100, 250), budget(500)),
+            Some(vec![[2; 32]])
+        );
+        // 350 more bytes need 250 freed: [2; 32], then [1; 32].
+        assert_eq!(
+            evictions_for(&ids, &costs, (100, 350), budget(500)),
+            Some(vec![[2; 32], [1; 32]])
+        );
+        // Room would need [3; 32] too, which pays as much per byte, so nothing is evicted.
+        assert_eq!(evictions_for(&ids, &costs, (60, 200), budget(250)), None);
+        // An object larger than the whole budget never fits.
+        assert_eq!(
+            evictions_for(&ids, &costs, (u64::MAX, 600), budget(500)),
+            None
+        );
     }
 
     #[test]
