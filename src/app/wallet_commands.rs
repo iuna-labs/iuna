@@ -1,7 +1,7 @@
 //! Ed25519-only wallet operations for IUNA.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     sync::{
         RwLock,
         atomic::{AtomicU32, Ordering},
@@ -551,10 +551,16 @@ impl Wallet {
         }
         self.change_cursor
             .store(WALLET_CHANGE_ADDRESS_LIMIT, Ordering::Relaxed);
-        Ok((0..WALLET_CHANGE_ADDRESS_LIMIT)
-            .map(|index| self.child_key(CHANGE_BRANCH, index))
-            .find(holds_nothing)
-            .unwrap_or_else(|| self.child_key(CHANGE_BRANCH, 0)))
+        // One pass over the UTXO set, not one per index: this runs under the node lock.
+        let owners = state
+            .utxos
+            .values()
+            .map(|output| output.owner)
+            .collect::<HashSet<_>>();
+        let index = (0..WALLET_CHANGE_ADDRESS_LIMIT)
+            .find(|index| !owners.contains(&self.change_address(*index)))
+            .unwrap_or(0);
+        Ok(self.child_key(CHANGE_BRANCH, index))
     }
 
     /// A change address is only consumed once its object reaches the mempool. Rejected

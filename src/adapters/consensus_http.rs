@@ -684,16 +684,27 @@ pub fn operator_router(
                 .map(|host| host.to_ascii_lowercase())
                 .collect::<BTreeSet<_>>(),
         );
+        // Logged once, so an operator sees why a name stopped working without a flood of lines.
+        let logged = Arc::new(AtomicBool::new(false));
         router.layer(middleware::from_fn(move |request: Request, next: Next| {
             let allowed = allowed.clone();
+            let logged = logged.clone();
             async move {
-                let known = request_host(&request).is_some_and(|host| {
+                let host = request_host(&request);
+                let known = host.is_some_and(|host| {
                     let name = host_name(host);
                     is_address_or_localhost(name) || allowed.contains(&name.to_ascii_lowercase())
                 });
                 if known {
                     next.run(request).await
                 } else {
+                    if !logged.swap(true, Ordering::Relaxed) {
+                        eprintln!(
+                            "refusing HTTP requests for host {:?}; serve a host name with \
+                             --http-host NAME (further refusals are not logged)",
+                            host.unwrap_or("")
+                        );
+                    }
                     StatusCode::FORBIDDEN.into_response()
                 }
             }

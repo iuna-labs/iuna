@@ -365,10 +365,11 @@ async fn main() -> Result<()> {
     let _ = mining.await;
     ledger_mining_task.abort();
     let _ = ledger_mining_task.await;
-    // Not aborted: a save already running finishes first, so it cannot land after the final one.
+    // Peers stop first, so nothing they relay changes the mempool after its final save. Not
+    // aborted: a save already running finishes first, so it cannot land after the final one.
+    network.shutdown().await;
     let _ = stop_persistence.send(true);
     let _ = persistence.await;
-    network.shutdown().await;
     result
 }
 
