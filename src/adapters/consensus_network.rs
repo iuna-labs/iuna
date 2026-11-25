@@ -49,6 +49,9 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_HELLO_LINE_BYTES: usize = 16 * 1024;
 /// Longer than any quiet stretch of a live network; an outbound peer simply reconnects.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// A started line must be finished within this, so a peer cannot park up to 8 MiB of unfinished
+/// line in memory for the whole idle timeout. A full line still only needs about 28 KiB/s.
+const LINE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// For each chunk, so a slow but moving uplink can finish an 8 MiB block batch.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_CHUNK_BYTES: usize = 64 * 1024;
@@ -312,14 +315,22 @@ pub fn seed_added_peers(path: &Path, peers: &[PeerAddress]) -> Result<()> {
     write_atomically(path, &serde_json::to_vec_pretty(&seeded)?).context("writing bootstrap peers")
 }
 
+/// An entry that no longer parses, edited by hand or refused by a stricter release, is skipped
+/// with a warning instead of keeping the node from starting.
 pub fn load_added_peers(path: &Path) -> Result<Vec<PeerAddress>> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice::<Vec<String>>(&bytes)
+        Ok(bytes) => Ok(serde_json::from_slice::<Vec<String>>(&bytes)
             .context("decoding saved peers")?
             .iter()
+            .filter_map(|address| match address.parse() {
+                Ok(address) => Some(address),
+                Err(error) => {
+                    eprintln!("skipping saved peer {address:?}: {error:#}");
+                    None
+                }
+            })
             .take(MAX_PEER_TARGETS)
-            .map(|address| address.parse().context("parsing saved peer address"))
-            .collect(),
+            .collect()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(error) => Err(error).context("reading saved peers"),
     }
@@ -442,10 +453,12 @@ impl PeerRegistry {
             return false;
         }
         targets.remove(address);
-        drop(targets);
+        // Queued under the lock: a Hello that names this address again queues its Add after this
+        // Remove, so the supervisor dials it anew instead of keeping a target without a task.
         if let Ok(commands) = self.command_sender() {
             let _ = commands.send(PeerCommand::Remove(address.clone()));
         }
+        drop(targets);
         true
     }
 
@@ -1067,12 +1080,21 @@ async fn run_connection(
     let mut read_deadline = Instant::now() + HELLO_TIMEOUT;
     // Lives outside the select loop: a partial line survives when another branch wins the race.
     let mut partial_line = Vec::new();
+    // When the unfinished line in `partial_line` was first seen. The loop wakes at least once per
+    // advertisement interval, so a stalled line is noticed within that much of its deadline.
+    let mut line_started: Option<Instant> = None;
     let mut peer_advertisement = tokio::time::interval_at(
         Instant::now() + PEER_ADVERTISEMENT_INTERVAL,
         PEER_ADVERTISEMENT_INTERVAL,
     );
 
     loop {
+        let deadline = if partial_line.is_empty() {
+            line_started = None;
+            read_deadline
+        } else {
+            read_deadline.min(*line_started.get_or_insert_with(Instant::now) + LINE_TIMEOUT)
+        };
         tokio::select! {
             // In this order: a line that arrived while a write held up the loop beats the deadline.
             biased;
@@ -1174,19 +1196,22 @@ async fn run_connection(
                 // Keep only the final range response: every singleton import asks for the next
                 // range while the remote Hello still says this node is behind.
                 if let Envelope::Blocks { blocks } = envelope {
-                    let (responses, gossip) = import_block_range(
+                    let (responses, gossip, imported) = import_block_range(
                         &node,
                         &mut session,
                         blocks,
                         &peers,
                         &peer_key,
                     )
-                    .await?;
-                    for response in responses {
-                        write_envelope(&mut writer, &response).await?;
-                    }
+                    .await;
+                    // Blocks activated before a bad one are announced even though the session
+                    // then ends, so peers do not wait for the next Hello to learn the new tip.
                     for envelope in gossip {
                         let _ = relay_outbound.send(envelope);
+                    }
+                    imported?;
+                    for response in responses {
+                        write_envelope(&mut writer, &response).await?;
                     }
                     continue;
                 }
@@ -1260,7 +1285,7 @@ async fn run_connection(
                     let _ = relay_outbound.send(envelope);
                 }
             }
-            () = tokio::time::sleep_until(read_deadline) => bail!("peer timed out"),
+            () = tokio::time::sleep_until(deadline) => bail!("peer timed out"),
         }
     }
 }
@@ -1271,21 +1296,25 @@ async fn import_block_range(
     blocks: Vec<HeartbeatBlock>,
     peers: &PeerRegistry,
     peer_key: &str,
-) -> Result<(Vec<Envelope>, Vec<Envelope>)> {
+) -> (Vec<Envelope>, Vec<Envelope>, Result<()>) {
     let mut responses = Vec::new();
     let mut first_tip = None;
     let mut final_tip = None;
+    let mut imported = Ok(());
     let mut blocks = blocks.into_iter().peekable();
 
     // An empty range still ends a side-branch walk and must reach PeerSession.
     if blocks.peek().is_none() {
         let mut locked = node.lock().await;
         let tip = locked.status().tip;
-        responses = handle_blocking_peer_envelope(
+        match handle_blocking_peer_envelope(
             session,
             &mut locked,
             Envelope::Blocks { blocks: Vec::new() },
-        )?;
+        ) {
+            Ok(handled) => responses = handled,
+            Err(error) => imported = Err(error),
+        }
         first_tip = Some(tip);
         final_tip = Some(locked.status().tip);
     }
@@ -1293,15 +1322,22 @@ async fn import_block_range(
     for block in blocks {
         let mut locked = node.lock().await;
         first_tip.get_or_insert_with(|| locked.status().tip);
-        responses = handle_blocking_peer_envelope(
+        let handled = handle_blocking_peer_envelope(
             session,
             &mut locked,
             Envelope::Blocks {
                 blocks: vec![block],
             },
-        )?;
+        );
         final_tip = Some(locked.status().tip);
         drop(locked);
+        match handled {
+            Ok(handled) => responses = handled,
+            Err(error) => {
+                imported = Err(error);
+                break;
+            }
+        }
         // Tokio's mutex is fair; yielding lets already-waiting HTTP and projection tasks take
         // their turn before the next block import reacquires it.
         tokio::task::yield_now().await;
@@ -1314,7 +1350,7 @@ async fn import_block_range(
         }],
         _ => Vec::new(),
     };
-    Ok((responses, gossip))
+    (responses, gossip, imported)
 }
 
 fn handle_blocking_peer_envelope(
@@ -1498,6 +1534,18 @@ mod tests {
         fs::write(&path, "[]").unwrap();
         seed_added_peers(&path, &peers).unwrap();
         assert!(load_added_peers(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_saved_peer_is_skipped_instead_of_stopping_the_node() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("peers.json");
+        fs::write(&path, r#"["not a peer", "203.0.113.7:9444"]"#).unwrap();
+
+        assert_eq!(
+            load_added_peers(&path).unwrap(),
+            ["203.0.113.7:9444".parse::<PeerAddress>().unwrap()]
+        );
     }
 
     #[test]
@@ -1873,15 +1921,15 @@ mod tests {
                 .unwrap();
         }
 
-        let (responses, gossip) = import_block_range(
+        let (responses, gossip, imported) = import_block_range(
             &target,
             &mut session,
             blocks,
             &PeerRegistry::default(),
             "test-peer",
         )
-        .await
-        .unwrap();
+        .await;
+        imported.unwrap();
 
         assert!(responses.is_empty(), "the final block completes the range");
         assert!(matches!(
@@ -1890,6 +1938,63 @@ mod tests {
         ));
         assert_eq!(target.lock().await.status(), remote);
         assert!(!session.is_syncing());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_range_that_fails_part_way_still_announces_the_blocks_it_activated() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut source =
+            Node::open(ConsensusChainStore::open(directory.path().join("source.sqlite3")).unwrap())
+                .unwrap();
+        for height in 1..=3 {
+            source
+                .mine_next(
+                    GENESIS_TIMESTAMP + height * crate::consensus::HEARTBEAT_TARGET_INTERVAL_SECS,
+                    [91; 32],
+                )
+                .unwrap();
+        }
+        let remote = source.status();
+        let mut blocks = source
+            .chain()
+            .canonical_blocks_after(Some(0))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let second = blocks[1].hash();
+        // The last block no longer matches its proof of work.
+        blocks[2].header.miner_public_key = [92; 32];
+        let target = Arc::new(Mutex::new(
+            Node::open(ConsensusChainStore::open(directory.path().join("target.sqlite3")).unwrap())
+                .unwrap(),
+        ));
+        let mut session = PeerSession::default();
+        {
+            let mut locked = target.lock().await;
+            session
+                .handle(
+                    &mut locked,
+                    Envelope::Hello(Hello::new(remote.height, remote.tip)),
+                    GENESIS_TIMESTAMP,
+                )
+                .unwrap();
+        }
+
+        let (_, gossip, imported) = import_block_range(
+            &target,
+            &mut session,
+            blocks,
+            &PeerRegistry::default(),
+            "test-peer",
+        )
+        .await;
+
+        assert!(imported.is_err());
+        assert_eq!(target.lock().await.status().tip, second);
+        assert!(matches!(
+            gossip.as_slice(),
+            [Envelope::Inventory { block_hashes }] if block_hashes == &[second]
+        ));
     }
 
     #[tokio::test]
