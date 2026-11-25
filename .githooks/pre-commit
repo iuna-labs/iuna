@@ -5,5 +5,8 @@ cargo fmt -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --all-targets --all-features
+# The live TCP tests are ignored by default because sandboxes may forbid binding sockets. A
+# developer machine can bind them, and they catch P2P regressions no unit test sees.
+cargo test --all-targets --all-features -- --ignored
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 node --test tests/*.test.cjs
