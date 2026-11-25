@@ -1,7 +1,8 @@
 import { generateMnemonic, mnemonicEntropy, validateMnemonic } from "./mnemonic.js";
 import {
   apiEndpoint, buildSignedTransaction, decryptWallet, defaultApiEndpoint, encryptWallet, fetchBlockRewards,
-  fetchWalletView, fetchWalletActivity, formatIuna, parseIuna, submitTransaction, walletFromEntropy,
+  fetchWalletView, fetchWalletActivity, formatIuna, nextChangeIndex, parseIuna, submitTransaction,
+  walletFromEntropy,
 } from "./wallet-core.js";
 
 const app = document.querySelector("#app");
@@ -435,7 +436,7 @@ async function sendPendingTransfer() {
   const transaction = await buildSignedTransaction({ wallet, utxos: view.utxos, changeIndex: view.change_index, ...transfer });
   const result = await submitTransaction(apiEndpoint(), transaction);
   // A second send before the next refresh must not reuse this change address.
-  if (transaction.outputs.length > 1) view.change_index = (view.change_index || 0) + 1;
+  if (transaction.outputs.length > 1) view.change_index = nextChangeIndex(view.change_index);
   pendingTransfer = null;
   toast(`Transaction submitted: ${result.id.slice(0, 12)}…`);
   await refresh(true);

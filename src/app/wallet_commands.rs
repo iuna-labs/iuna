@@ -24,6 +24,11 @@ use super::consensus_node::{ChainRepository, Node};
 pub const AUTOMATIC_TICKET_MAX_INPUTS: usize = 32;
 /// Recovery scans this deterministic window even when older addresses have already been emptied.
 pub const WALLET_ADDRESS_SCAN_LIMIT: u32 = 1_000;
+/// The browser wallet's gap limit: it scans this many unused addresses past the last used one.
+const BROWSER_WALLET_GAP_LIMIT: u32 = 20;
+/// Change goes to indexes below this, so a browser wallet's gap scan never has to pass the scan
+/// limit. Once every index here has been used, change reuses an address that holds nothing.
+pub const WALLET_CHANGE_ADDRESS_LIMIT: u32 = WALLET_ADDRESS_SCAN_LIMIT - BROWSER_WALLET_GAP_LIMIT;
 
 const RECEIVE_BRANCH: u8 = 0;
 const CHANGE_BRANCH: u8 = 1;
@@ -526,19 +531,30 @@ impl Wallet {
             .cloned()
     }
 
+    /// A change key no output holds. Fresh indexes come first; once all of them have been used,
+    /// the lowest index holding nothing is reused instead of refusing to make change. Reuse only
+    /// costs privacy: a restored wallet still finds it, since it lies below the last used index.
     fn fresh_change_key(&self, state: &ConsensusState) -> Result<SigningKey> {
-        let mut index = self.change_cursor.load(Ordering::Relaxed);
-        while index < WALLET_ADDRESS_SCAN_LIMIT {
-            let key = self.child_key(CHANGE_BRANCH, index);
+        let holds_nothing = |key: &SigningKey| {
             let address = address_from_public_key(&key.verifying_key().to_bytes());
-            if !state.utxos.values().any(|output| output.owner == address) {
+            !state.utxos.values().any(|output| output.owner == address)
+        };
+        let mut index = self.change_cursor.load(Ordering::Relaxed);
+        while index < WALLET_CHANGE_ADDRESS_LIMIT {
+            let key = self.child_key(CHANGE_BRANCH, index);
+            if holds_nothing(&key) {
                 self.change_cursor
                     .store(index.saturating_add(1), Ordering::Relaxed);
                 return Ok(key);
             }
             index = index.saturating_add(1);
         }
-        bail!("wallet change-address scan limit reached")
+        self.change_cursor
+            .store(WALLET_CHANGE_ADDRESS_LIMIT, Ordering::Relaxed);
+        Ok((0..WALLET_CHANGE_ADDRESS_LIMIT)
+            .map(|index| self.child_key(CHANGE_BRANCH, index))
+            .find(holds_nothing)
+            .unwrap_or_else(|| self.child_key(CHANGE_BRANCH, 0)))
     }
 
     /// A change address is only consumed once its object reaches the mempool. Rejected
@@ -555,7 +571,8 @@ impl Wallet {
 
     fn sync_change_cursor<R: ChainRepository>(&self, node: &mut Node<R>) {
         let mut index = self.change_cursor.load(Ordering::Relaxed);
-        while index < WALLET_ADDRESS_SCAN_LIMIT && node.address_used(&self.change_address(index)) {
+        while index < WALLET_CHANGE_ADDRESS_LIMIT && node.address_used(&self.change_address(index))
+        {
             index = index.saturating_add(1);
         }
         self.change_cursor.fetch_max(index, Ordering::Relaxed);
@@ -896,5 +913,41 @@ mod tests {
             .find(|transaction| transaction.id() == receipt.id)
             .unwrap();
         assert_eq!(transaction.outputs[1].owner, wallet.change_address(0));
+    }
+
+    #[test]
+    fn change_reuses_an_empty_address_once_every_index_was_used() {
+        let wallet = Wallet::from_seed(GENESIS_SEED);
+        let (_, genesis) = pinned_genesis().unwrap();
+        wallet
+            .change_cursor
+            .store(WALLET_CHANGE_ADDRESS_LIMIT - 1, Ordering::Relaxed);
+        let change_owner = |state: &ConsensusState| {
+            wallet
+                .build_transaction(state, &BTreeSet::new(), [91; 32], 10_000_000, 0)
+                .unwrap()
+                .outputs[1]
+                .owner
+        };
+
+        assert_eq!(
+            change_owner(&genesis),
+            wallet.change_address(WALLET_CHANGE_ADDRESS_LIMIT - 1)
+        );
+        // Every fresh index is used now, so the lowest empty one comes back.
+        assert_eq!(change_owner(&genesis), wallet.change_address(0));
+        let mut holding = genesis.clone();
+        let outpoint = holding.utxos.keys().next().unwrap().clone();
+        holding.utxos.insert(
+            OutPoint {
+                output_index: outpoint.output_index + 1,
+                ..outpoint
+            },
+            Output {
+                owner: wallet.change_address(0),
+                value: 1,
+            },
+        );
+        assert_eq!(change_owner(&holding), wallet.change_address(1));
     }
 }

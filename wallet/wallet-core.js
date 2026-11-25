@@ -7,6 +7,9 @@ const ADDRESS_GAP_LIMIT = 20;
 // Matches the node wallet keyring and bounds discovery if a node falsely reports every address
 // as used.
 const ADDRESS_SCAN_LIMIT = 1_000;
+// Change stays below this, so the gap scan past the last used change index never reaches the scan
+// limit. Matches the node wallet's WALLET_CHANGE_ADDRESS_LIMIT.
+const CHANGE_ADDRESS_LIMIT = ADDRESS_SCAN_LIMIT - ADDRESS_GAP_LIMIT;
 // Matches the node limit: the root plus one gap window of both branches fits in one request.
 const MAX_ADDRESS_BATCH = 64;
 const RECEIVE_BRANCH = 0;
@@ -232,10 +235,28 @@ async function discoverWalletView(endpoint, wallet) {
     next_utxo_offset: null,
     receive_address: receiveKey.addressHex,
     receive_index: receiveIndex,
-    change_index: branches[CHANGE_BRANCH].highestUsed + 1,
+    change_index: changeIndexFor(branches[CHANGE_BRANCH].highestUsed, entries),
     activity_addresses: activityAddresses,
     activity,
   };
+}
+
+// The next fresh change index or, once every one below the limit was used, the lowest change
+// address holding nothing. Reuse only costs privacy; a fresh index past the limit would make the
+// wallet fail to load.
+function changeIndexFor(highestUsed, entries) {
+  if (highestUsed + 1 < CHANGE_ADDRESS_LIMIT) return highestUsed + 1;
+  const empty = entries
+    .filter(({ key, summary }) => key.branch === CHANGE_BRANCH && key.index < CHANGE_ADDRESS_LIMIT
+      && Number(summary.balance) === 0 && Number(summary.utxo_count) === 0)
+    .map(({ key }) => key.index);
+  return empty.length ? Math.min(...empty) : 0;
+}
+
+// The change index for a second send before the next refresh.
+export function nextChangeIndex(index) {
+  const next = (index || 0) + 1;
+  return next < CHANGE_ADDRESS_LIMIT ? next : 0;
 }
 
 // A reward has no transaction of its own: the node lists the fees and payouts it collects.

@@ -194,6 +194,61 @@ test('browser wallet bounds address discovery when a node reports an unending us
   }
 });
 
+test('browser wallet reuses an empty change address once every change index was used', async () => {
+  const wallet = {
+    publicKeyHex: '11'.repeat(32),
+    addressHex: '22'.repeat(32),
+    async keyAt(branch, index) {
+      return { branch, index, addressHex: `${branch}${String(index).padStart(63, '0')}` };
+    },
+  };
+  const funded = `1${String(0).padStart(63, '0')}`;
+  const chain = { network: 'iuna-mainnet-candidate', heartbeat_height: 7, tip_timestamp: 123, tip_hash: 'ff'.repeat(32), ledger_blocks: 1 };
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    if (String(url).endsWith('/api/public/wallet-activity')) {
+      return json({ ...chain, scanned_heartbeats: 7, pending: [], confirmed: [], next_before_height: null });
+    }
+    if (String(url).endsWith('/api/public/wallet-addresses')) {
+      const { addresses } = JSON.parse(options.body);
+      return json({
+        ...chain,
+        // Every change index below the limit was used; only change 0 still holds an output.
+        addresses: addresses.map((address) => ({
+          address,
+          used: address.startsWith('1') && Number.parseInt(address.slice(1), 10) < 980,
+          balance: address === funded ? 5 : 0,
+          spendable_balance: address === funded ? 5 : 0,
+          utxo_count: address === funded ? 1 : 0,
+        })),
+        pending_transaction_ids: [],
+      });
+    }
+    return json({
+      ...chain,
+      address: funded,
+      used: true,
+      balance: 5,
+      spendable_balance: 5,
+      utxos: [{ transaction_id: '11'.repeat(32), output_index: 0, value: 5, reserved: false }],
+      pending_transaction_ids: [],
+      utxos_truncated: false,
+      next_utxo_offset: null,
+    });
+  };
+  try {
+    const view = await core.fetchWalletView('https://wallet.getiuna.org', wallet);
+    assert.equal(view.change_index, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(core.nextChangeIndex(5), 6);
+  assert.equal(core.nextChangeIndex(978), 979);
+  assert.equal(core.nextChangeIndex(979), 0);
+  assert.equal(core.nextChangeIndex(undefined), 1);
+});
+
 test('sent activity separates pending, mined and dropped transactions', async () => {
   const wallet = await core.walletFromEntropy(new Uint8Array(32));
   const transaction = await core.buildSignedTransaction({
@@ -293,7 +348,7 @@ test('wallet settings name reachable endpoints and previous wallets are explaine
   // A view that loads after the wallet was locked or switched never replaces the current one.
   assert.match(app, /async function refresh[^]*?const owner = wallet;[^]*?fetchWalletView\(apiEndpoint\(\), owner\);\s*if \(wallet !== owner\) return false;\s*mergeLoadedActivity/);
   assert.match(app, /catch \(error\) \{\s*if \(wallet !== owner\) return false;/);
-  assert.match(app, /submitTransaction\(apiEndpoint\(\), transaction\);[^]*?view\.change_index = \(view\.change_index \|\| 0\) \+ 1/);
+  assert.match(app, /submitTransaction\(apiEndpoint\(\), transaction\);[^]*?view\.change_index = nextChangeIndex\(view\.change_index\)/);
 });
 
 test('wallet only reserves fixed navigation space while it is visible', () => {
