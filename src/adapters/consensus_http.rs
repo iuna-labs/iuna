@@ -1106,7 +1106,11 @@ async fn public_wallet_activity(
         &owners,
         &rewards,
         &projected_inputs,
-        request.before_height,
+        activity_start(
+            &node.canonical_hashes(),
+            chain.tip().tip,
+            request.before_height,
+        ),
         WALLET_ACTIVITY_PAGE_HEARTBEATS,
     );
     let tip = chain.tip();
@@ -1261,26 +1265,40 @@ fn projected_input_values(details: &[String]) -> ProjectedInputValues {
 /// One chronological wallet-activity page, newest first. Remote clients can page to any height,
 /// so this never replays a block: input values come from a state still at hand, or else from the
 /// projection. Without either, a spend from the page is left out rather than priced wrongly.
+/// The newest canonical block of a page that ends before `before_height`, looked up by height
+/// so a page deep in history does not walk back from the tip under the node lock. `None` when
+/// nothing lies below it.
+fn activity_start(canonical: &[Hash], tip: Hash, before_height: Option<u64>) -> Option<Hash> {
+    let Some(before) = before_height else {
+        return Some(tip);
+    };
+    let height = usize::try_from(before.checked_sub(1)?).ok()?;
+    match canonical.get(height) {
+        Some(hash) => Some(*hash),
+        // A cursor above the tip, from a client that saw a longer chain, starts at the tip.
+        None if height >= canonical.len() => Some(tip),
+        None => None,
+    }
+}
+
 fn confirmed_wallet_activity(
     chain: &Chain,
     owners: &BTreeSet<Address>,
     rewards: &BTreeMap<String, WalletRewards>,
     projected_inputs: &ProjectedInputValues,
-    before_height: Option<u64>,
+    start: Option<Hash>,
     page_heartbeats: u64,
 ) -> (u64, Vec<WalletActivityItem>, Option<u64>) {
     let mut blocks = Vec::new();
-    let mut cursor = Some(chain.tip().tip);
+    let mut cursor = start;
     while let Some(hash) = cursor {
         let Some(block) = chain.block(&hash) else {
             break;
         };
         cursor = block.header.parent;
-        if before_height.is_none_or(|before| block.header.height < before) {
-            blocks.push(block);
-            if blocks.len() >= usize::try_from(page_heartbeats).unwrap_or(usize::MAX) {
-                break;
-            }
+        blocks.push(block);
+        if blocks.len() >= usize::try_from(page_heartbeats).unwrap_or(usize::MAX) {
+            break;
         }
     }
     let scanned = u64::try_from(blocks.len()).unwrap_or(u64::MAX);
@@ -1443,7 +1461,11 @@ async fn wallet_activity(
         &owners,
         &rewards,
         &projected_inputs,
-        query.before_height,
+        activity_start(
+            &node.canonical_hashes(),
+            chain.tip().tip,
+            query.before_height,
+        ),
         WALLET_ACTIVITY_PAGE_HEARTBEATS,
     );
     Ok(Json(WalletActivityView {
@@ -3230,12 +3252,14 @@ mod tests {
             },
         )]);
 
+        let canonical = [crate::consensus::GENESIS_HASH, chain.tip().tip];
+        let tip = chain.tip().tip;
         let (scanned, newest, cursor) = confirmed_wallet_activity(
             &chain,
             &BTreeSet::new(),
             &rewards,
             &BTreeMap::new(),
-            None,
+            activity_start(&canonical, tip, None),
             1,
         );
         assert_eq!(scanned, 1);
@@ -3248,12 +3272,21 @@ mod tests {
             &BTreeSet::new(),
             &rewards,
             &BTreeMap::new(),
-            cursor,
+            activity_start(&canonical, tip, cursor),
             1,
         );
         assert_eq!(scanned, 1);
         assert!(older.is_empty());
         assert_eq!(cursor, None);
+
+        // Pages are found by height: below genesis there is nothing, above the tip starts there.
+        assert_eq!(activity_start(&canonical, tip, Some(0)), None);
+        assert_eq!(
+            activity_start(&canonical, tip, Some(1)),
+            Some(crate::consensus::GENESIS_HASH)
+        );
+        assert_eq!(activity_start(&canonical, tip, Some(2)), Some(tip));
+        assert_eq!(activity_start(&canonical, tip, Some(u64::MAX)), Some(tip));
     }
 
     #[tokio::test]
