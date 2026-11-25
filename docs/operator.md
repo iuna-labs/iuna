@@ -306,7 +306,9 @@ peers.
 
 Hello messages also carry at most `8` outbound peers that answered with a valid Hello. A node
 accepts only public `IP:port` entries from that list, skips its own advertised address and dials
-them as temporary discovered targets. A discovered target is dropped as soon as a dial or session
+them as temporary discovered targets. Each Hello also carries a random per-process nonce: a node
+that receives its own nonce has dialled itself, closes that session and never dials or learns that
+address again, even when it advertises `0.0.0.0`. A discovered target is dropped as soon as a dial or session
 with it fails, which frees its slot for a peer another Hello names. The list is refreshed every
 minute and discovered peers pass on their own reachable peers in turn, so the network can converge
 beyond its initial bootstrap connections. Discovered targets do not consume the operator's

@@ -1,12 +1,12 @@
 //! Tokio TCP transport for the peer state machine.
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs, io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, Mutex as StdMutex, RwLock},
+    sync::{Arc, Mutex as StdMutex, OnceLock, RwLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -268,6 +268,11 @@ pub struct PeerRegistry {
     mutations: Arc<StdMutex<()>>,
     commands: Arc<RwLock<Option<mpsc::UnboundedSender<PeerCommand>>>>,
     store_path: Arc<RwLock<Option<PathBuf>>>,
+    /// This process's Hello nonce, drawn on first use.
+    node_nonce: Arc<OnceLock<u64>>,
+    /// Targets whose Hello carried this node's nonce. A node advertising `0.0.0.0` cannot tell its
+    /// public address from an endpoint string, so it learns it here and never dials it again.
+    own_addresses: Arc<RwLock<BTreeSet<PeerAddress>>>,
 }
 
 /// Reads the runtime-added peers saved by an earlier run. A missing file means none.
@@ -321,6 +326,36 @@ pub fn load_added_peers(path: &Path) -> Result<Vec<PeerAddress>> {
 }
 
 impl PeerRegistry {
+    /// The nonce this node puts in every Hello. A Hello carrying it came from this node itself.
+    pub fn node_nonce(&self) -> u64 {
+        *self.node_nonce.get_or_init(|| {
+            let mut bytes = [0; 8];
+            getrandom::getrandom(&mut bytes).expect("operating system randomness is available");
+            u64::from_le_bytes(bytes)
+        })
+    }
+
+    /// Remembers that the session behind `peer_key` reached this node itself. An outbound target
+    /// is then never learned or dialled again; a discovered one also gives up its slot.
+    fn mark_own_session(&self, peer_key: &str) {
+        if let Some(address) = peer_key
+            .strip_prefix("outbound:")
+            .and_then(|address| address.parse::<PeerAddress>().ok())
+        {
+            self.own_addresses
+                .write()
+                .expect("peer registry lock poisoned")
+                .insert(address);
+        }
+    }
+
+    fn is_own_address(&self, address: &PeerAddress) -> bool {
+        self.own_addresses
+            .read()
+            .expect("peer registry lock poisoned")
+            .contains(address)
+    }
+
     pub fn targets(&self) -> Vec<PeerTarget> {
         self.targets
             .read()
@@ -365,7 +400,7 @@ impl PeerRegistry {
     /// Learns a peer from a Hello. The node's own advertised address is never learned: a peer
     /// that dialled this node passes it back, and a session with itself would hold two slots.
     fn discover_target(&self, address: PeerAddress, own: Option<&PeerAddress>) {
-        if own == Some(&address) {
+        if own == Some(&address) || self.is_own_address(&address) {
             return;
         }
         let Ok(commands) = self.command_sender() else {
@@ -980,7 +1015,9 @@ async fn run_outbound_peer(
                 target.last_error = Some(error.to_string());
             }),
         }
-        if context.peers.forget_discovered(&peer) {
+        // A target that turned out to be this node is not dialled again. An added one stays
+        // listed with the reason as its last error, so the operator can remove it.
+        if context.peers.forget_discovered(&peer) || context.peers.is_own_address(&peer) {
             break;
         }
         tokio::select! {
@@ -1019,7 +1056,8 @@ async fn run_connection(
         &Envelope::Hello(
             Hello::new(status.height, status.tip)
                 .with_listen_addr(advertisement.get().map(|address| address.to_string()))
-                .with_known_peers(peers.known_peers_for_hello(&peer_key)),
+                .with_known_peers(peers.known_peers_for_hello(&peer_key))
+                .with_node_nonce(peers.node_nonce()),
         ),
     )
     .await?;
@@ -1057,7 +1095,8 @@ async fn run_connection(
                     &Envelope::Hello(
                         Hello::new(status.height, status.tip)
                             .with_listen_addr(advertisement.get().map(|address| address.to_string()))
-                            .with_known_peers(peers.known_peers_for_hello(&peer_key)),
+                            .with_known_peers(peers.known_peers_for_hello(&peer_key))
+                            .with_node_nonce(peers.node_nonce()),
                     ),
                 )
                 .await?;
@@ -1074,6 +1113,10 @@ async fn run_connection(
                 let envelope = decode_line(&line)?;
                 match &envelope {
                     Envelope::Hello(hello) => {
+                        if hello.node_nonce == Some(peers.node_nonce()) {
+                            peers.mark_own_session(&peer_key);
+                            bail!("connected to this node itself");
+                        }
                         peers.update_hello(&peer_key, hello);
                         let own = advertisement.get();
                         if hello.validate().is_ok() {
@@ -1658,6 +1701,35 @@ mod tests {
         let default = own("0.0.0.0:9444");
         assert!(!is_own_endpoint(Some(&default), Some("0.0.0.0:9444")));
         assert!(!is_own_endpoint(None, Some("0.0.0.0:9444")));
+    }
+
+    #[test]
+    fn a_node_advertising_the_default_endpoint_stops_learning_its_public_address() {
+        let registry = PeerRegistry::default();
+        let (commands, _received) = mpsc::unbounded_channel();
+        *registry.commands.write().unwrap() = Some(commands);
+        assert_eq!(registry.node_nonce(), registry.node_nonce());
+        assert_ne!(registry.node_nonce(), PeerRegistry::default().node_nonce());
+        let default = "0.0.0.0:9444".parse::<PeerAddress>().unwrap();
+        let public = "87.215.225.115:9444";
+        let hello = Hello::new(0, crate::consensus::GENESIS_HASH)
+            .with_known_peers(vec![public.to_owned(), "87.215.225.116:9444".to_owned()]);
+
+        // The session that dialled `public` received this node's own nonce.
+        registry.mark_own_session(&format!("outbound:{public}"));
+        registry.discover_hello_peers(&hello, Some(&default));
+
+        assert_eq!(
+            registry
+                .targets()
+                .iter()
+                .map(|target| target.address.as_str())
+                .collect::<Vec<_>>(),
+            ["87.215.225.116:9444"]
+        );
+        // Inbound sessions name no dialled address, so nothing is remembered for them.
+        registry.mark_own_session("inbound:87.215.225.117:50000");
+        assert_eq!(registry.own_addresses.read().unwrap().len(), 1);
     }
 
     #[test]

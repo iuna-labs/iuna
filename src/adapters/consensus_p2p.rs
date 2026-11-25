@@ -38,6 +38,10 @@ pub struct Hello {
     /// ignored by older nodes, so peer discovery can return without a protocol flag day.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub known_peers: Vec<String>,
+    /// Random per process, so a node that dialled itself recognizes its own Hello whatever
+    /// address it advertises. Optional and ignored by older nodes, like the fields above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_nonce: Option<u64>,
 }
 
 impl Hello {
@@ -50,6 +54,7 @@ impl Hello {
             tip_hash,
             listen_addr: None,
             known_peers: Vec::new(),
+            node_nonce: None,
         }
     }
 
@@ -60,6 +65,11 @@ impl Hello {
 
     pub fn with_known_peers(mut self, known_peers: Vec<String>) -> Self {
         self.known_peers = known_peers;
+        self
+    }
+
+    pub fn with_node_nonce(mut self, node_nonce: u64) -> Self {
+        self.node_nonce = Some(node_nonce);
         self
     }
 
@@ -250,6 +260,13 @@ mod tests {
         let decoded: Hello = serde_json::from_value(old).unwrap();
         assert_eq!(decoded.listen_addr, None);
         assert!(decoded.known_peers.is_empty());
+        assert_eq!(decoded.node_nonce, None);
+        assert!(
+            serde_json::to_value(Hello::new(7, tip))
+                .unwrap()
+                .get("node_nonce")
+                .is_none()
+        );
 
         let announced = Hello::new(7, tip)
             .with_listen_addr(Some("203.0.113.10:9444".to_owned()))
