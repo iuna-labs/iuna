@@ -33,7 +33,10 @@ use iuna::{
     },
     consensus::LEDGER_TARGET_INTERVAL_HEARTBEATS,
 };
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, watch},
+};
 
 mod legacy_data;
 
@@ -299,7 +302,12 @@ async fn main() -> Result<()> {
             .and_then(|height| height.checked_add(1))
             .unwrap_or(0),
     ));
-    let persistence = tokio::spawn(persist_mempool(Arc::clone(&node), mempool_path.clone()));
+    let (stop_persistence, persistence_stopped) = watch::channel(false);
+    let persistence = tokio::spawn(persist_mempool(
+        Arc::clone(&node),
+        mempool_path.clone(),
+        persistence_stopped,
+    ));
     let mining = tokio::spawn(run_heartbeat_miner(
         Arc::clone(&node),
         Arc::clone(&wallet_state),
@@ -357,11 +365,9 @@ async fn main() -> Result<()> {
     let _ = mining.await;
     ledger_mining_task.abort();
     let _ = ledger_mining_task.await;
-    persistence.abort();
+    // Not aborted: a save already running finishes first, so it cannot land after the final one.
+    let _ = stop_persistence.send(true);
     let _ = persistence.await;
-    if let Err(error) = save_mempool(&node, &mempool_path).await {
-        eprintln!("saving mempool on shutdown failed: {error:#}");
-    }
     network.shutdown().await;
     result
 }
@@ -458,10 +464,24 @@ fn lock_data_dir(data_dir: &std::path::Path) -> Result<std::fs::File> {
 
 /// Writes the mempool to disk whenever it changed, at most every few seconds, so pending
 /// transactions and tickets survive a restart.
-async fn persist_mempool(node: SharedConsensusNode, path: PathBuf) {
+/// Saves the mempool every 5 seconds when it changed and once more when `stop` is set. Saves run
+/// one at a time in this task, so the final one is always the last written.
+async fn persist_mempool(
+    node: SharedConsensusNode,
+    path: PathBuf,
+    mut stop: watch::Receiver<bool>,
+) {
     let mut saved_generation = None;
     loop {
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(5)) => {}
+            _ = stop.changed() => {
+                if let Err(error) = save_mempool(&node, &path).await {
+                    eprintln!("saving mempool on shutdown failed: {error:#}");
+                }
+                return;
+            }
+        }
         let generation = node.lock().await.mempool_generation();
         if saved_generation == Some(generation) {
             continue;

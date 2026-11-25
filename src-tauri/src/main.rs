@@ -342,9 +342,42 @@ fn stop_sidecar() {
     if let Some(sidecar) = SIDECAR.get()
         && let Some(child) = sidecar.0.lock().expect("sidecar mutex poisoned").take()
     {
-        let _ = child.kill();
+        stop_child(child);
     }
     release_system_awake_inhibitor();
+}
+
+/// How long the node gets to save its mempool and close its peers before it is killed.
+#[cfg(unix)]
+const NODE_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Asks the node to shut down as on Ctrl-C, so it saves what only lives in memory, and kills it
+/// only when it has not exited in time. A restart after a failed update then also finds the port
+/// and data directory free. Windows has no such signal, so the node is killed there.
+fn stop_child(child: CommandChild) {
+    #[cfg(unix)]
+    {
+        let pid = child.pid().to_string();
+        let signal = |signal: &str| {
+            std::process::Command::new("kill")
+                .args([signal, pid.as_str()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        if signal("-TERM") {
+            let deadline = std::time::Instant::now() + NODE_STOP_TIMEOUT;
+            while std::time::Instant::now() < deadline {
+                // Fails once the process is gone; the shell plugin reaps it as soon as it exits.
+                if !signal("-0") {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+    let _ = child.kill();
 }
 
 fn setup_error(error: impl Error + Send + Sync + 'static) -> Box<dyn Error> {
