@@ -20,6 +20,12 @@ storage.
   in application state only as a domain-separated SHA-256 hash.
 - When management is enabled, `--http` must use a loopback address. A remote
   operator interface must be provided by a separately secured TLS proxy.
+- A non-loopback `--http` listener only answers requests whose `Host` is an IP
+  address, `localhost`, or a name given with `--http-host NAME` (repeatable),
+  such as the host name of the ingress in front of it. A DNS-rebound page sends
+  a host name of its own and is refused, so it cannot read the wallet's balance
+  and activity. Anyone who can reach the port by address can still read them:
+  bind `--http` to an interface that only the operator can reach.
 - `--wallet-endpoint ADDRESS` explicitly enables the narrow public browser-wallet
   API on a separate listener. It is disabled when this option is absent and its
   port must differ from the operator and P2P listeners.

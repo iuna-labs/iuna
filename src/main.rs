@@ -41,6 +41,8 @@ mod legacy_data;
 struct Options {
     data_dir: PathBuf,
     http_addr: SocketAddr,
+    /// Host names a non-loopback `--http` listener answers besides IP addresses and localhost.
+    http_hosts: Vec<String>,
     wallet_endpoint_addr: Option<SocketAddr>,
     p2p_addr: SocketAddr,
     p2p_addr_configured: bool,
@@ -67,6 +69,7 @@ impl Default for Options {
             http_addr: "127.0.0.1:8080"
                 .parse()
                 .expect("valid default HTTP address"),
+            http_hosts: Vec::new(),
             wallet_endpoint_addr: None,
             p2p_addr: "0.0.0.0:9444".parse().expect("valid default P2P address"),
             p2p_addr_configured: false,
@@ -334,7 +337,7 @@ async fn main() -> Result<()> {
         p2p_command_line_override: options.p2p_addr_configured,
         p2p_advertisement,
     };
-    let application = operator_router(http_state.clone(), options.http_addr);
+    let application = operator_router(http_state.clone(), options.http_addr, &options.http_hosts);
     let server = axum::serve(http_listener, application).with_graceful_shutdown(shutdown_signal());
     let wallet_server = async move {
         match wallet_listener {
@@ -766,6 +769,17 @@ fn parse_options(arguments: impl IntoIterator<Item = String>) -> Result<Option<O
                     .parse()
                     .context("parsing --http socket address")?;
             }
+            "--http-host" => {
+                let host = value(&mut arguments, "--http-host")?;
+                if host.is_empty()
+                    || !host
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+                {
+                    bail!("--http-host takes a host name without port, such as admin.example.org");
+                }
+                options.http_hosts.push(host);
+            }
             "--wallet-endpoint" => {
                 options.wallet_endpoint_addr = Some(
                     value(&mut arguments, "--wallet-endpoint")?
@@ -826,6 +840,8 @@ fn print_help() {
          Usage: iuna [options]\n\n\
          --data-dir PATH   Chain and screen-data directory (default ~/.iuna)\n\
          --http ADDRESS    Operator HTTP address (default 127.0.0.1:8080)\n\
+         --http-host NAME  Host name a non-loopback --http listener answers, such as an\n\
+                           ingress name; may be repeated (IP addresses always work)\n\
          --wallet-endpoint ADDRESS  Opt-in public wallet API on a separate listener\n\
          --p2p ADDRESS     P2P listen address (overrides saved public-node settings)\n\
          --peer ADDRESS    Outbound peer, IP:port or host:port; may be repeated\n\
@@ -959,6 +975,26 @@ mod tests {
     fn missing_and_unknown_options_fail_closed() {
         assert!(parse_options(["--http".to_owned()]).is_err());
         assert!(parse_options(["--wallet-endpoint".to_owned()]).is_err());
+        assert!(parse_options(["--http-host".to_owned()]).is_err());
+        for host in ["", "admin.example:443", "https://admin.example", "a b"] {
+            assert!(
+                parse_options(["--http-host".to_owned(), host.to_owned()]).is_err(),
+                "{host}"
+            );
+        }
+        let options = parse_options(
+            [
+                "--http-host",
+                "admin.example",
+                "--http-host",
+                "other.example",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(options.http_hosts, ["admin.example", "other.example"]);
         assert!(parse_options(["--mystery".to_owned()]).is_err());
     }
 

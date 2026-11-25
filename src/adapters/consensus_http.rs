@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    net::SocketAddr,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     path::PathBuf,
     sync::{
         Arc, RwLock,
@@ -661,43 +661,97 @@ type ApiErrorResponse = (StatusCode, Json<ApiError>);
 
 /// The operator router for a listener on `address`. On a loopback listener every request must
 /// name a loopback Host: a DNS-rebound page reaches the same socket but sends its own host name,
-/// and reads carry no token. Other listeners sit behind an ingress with its own host names.
+/// and reads carry no token.
 /// A listener that serves management without a token only answers requests naming a loopback
 /// host. Behind a published container port, such as the local testnet's, the browser still sends
 /// one; a DNS-rebound page does not, and would otherwise read the unlocked wallet's data.
-pub fn operator_router(state: ConsensusHttpState, address: SocketAddr) -> Router {
+/// Any other listener answers a Host that is an IP address, `localhost`, or one of
+/// `allowed_hosts`, such as the name an ingress serves it under. Rebinding needs a host name the
+/// attacker controls, so an address typed into the browser is safe and every other name is refused.
+pub fn operator_router(
+    state: ConsensusHttpState,
+    address: SocketAddr,
+    allowed_hosts: &[String],
+) -> Router {
     let local_only = address.ip().is_loopback() || state.trusted_management;
     let router = router(state);
     if local_only {
         router.layer(middleware::from_fn(require_loopback_host))
     } else {
-        router
+        let allowed = Arc::new(
+            allowed_hosts
+                .iter()
+                .map(|host| host.to_ascii_lowercase())
+                .collect::<BTreeSet<_>>(),
+        );
+        router.layer(middleware::from_fn(move |request: Request, next: Next| {
+            let allowed = allowed.clone();
+            async move {
+                let known = request_host(&request).is_some_and(|host| {
+                    let name = host_name(host);
+                    is_address_or_localhost(name) || allowed.contains(&name.to_ascii_lowercase())
+                });
+                if known {
+                    next.run(request).await
+                } else {
+                    StatusCode::FORBIDDEN.into_response()
+                }
+            }
+        }))
     }
 }
 
 async fn require_loopback_host(request: Request, next: Next) -> Response {
-    let loopback = request
-        .headers()
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(is_loopback_host);
-    if loopback {
+    if request_host(&request).is_some_and(is_loopback_host) {
         next.run(request).await
     } else {
         StatusCode::FORBIDDEN.into_response()
     }
 }
 
-fn is_loopback_host(host: &str) -> bool {
-    let name = match host.rsplit_once(':') {
+/// The Host header, or the URI authority of an HTTP/2 request that carries none.
+fn request_host(request: &Request) -> Option<&str> {
+    request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            request
+                .uri()
+                .authority()
+                .map(|authority| authority.as_str())
+        })
+}
+
+/// The host part of a Host value, without its port.
+fn host_name(host: &str) -> &str {
+    match host.rsplit_once(':') {
         Some((name, port))
             if !name.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) =>
         {
             name
         }
         _ => host,
-    };
-    matches!(name, "127.0.0.1" | "localhost" | "[::1]")
+    }
+}
+
+fn host_ip(name: &str) -> Option<IpAddr> {
+    match name
+        .strip_prefix('[')
+        .and_then(|name| name.strip_suffix(']'))
+    {
+        Some(inner) => inner.parse::<Ipv6Addr>().ok().map(IpAddr::V6),
+        None => name.parse::<std::net::Ipv4Addr>().ok().map(IpAddr::V4),
+    }
+}
+
+fn is_address_or_localhost(name: &str) -> bool {
+    name.eq_ignore_ascii_case("localhost") || host_ip(name).is_some()
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let name = host_name(host);
+    name.eq_ignore_ascii_case("localhost") || host_ip(name).is_some_and(|ip| ip.is_loopback())
 }
 
 pub fn router(state: ConsensusHttpState) -> Router {
@@ -4487,6 +4541,8 @@ mod tests {
             "localhost:8080",
             "[::1]:8080",
             "[::1]",
+            "127.0.0.2:8080",
+            "LOCALHOST",
         ] {
             assert!(is_loopback_host(host), "{host}");
         }
@@ -4494,9 +4550,58 @@ mod tests {
             "evil.example",
             "evil.example:8080",
             "127.0.0.1.evil.example:80",
+            "192.168.1.5:8080",
+            "[::ffff:192.168.1.5]",
             "",
         ] {
             assert!(!is_loopback_host(host), "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn public_listeners_answer_addresses_and_named_hosts_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = management_state(
+            &directory,
+            Arc::new(Wallet::from_seed([42; 32])),
+            "0123456789abcdef0123456789abcdef",
+        );
+        state.operator_token_hash = None;
+        let application = operator_router(
+            state,
+            "0.0.0.0:8080".parse().unwrap(),
+            &["Admin.Example".to_owned()],
+        );
+        let status = |host: &'static str| {
+            let application = application.clone();
+            async move {
+                application
+                    .oneshot(
+                        Request::get("/api/status")
+                            .header(header::HOST, host)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        for host in [
+            "192.168.1.5:8080",
+            "[2001:db8::1]:8080",
+            "localhost:8080",
+            "admin.example",
+        ] {
+            assert_eq!(status(host).await, StatusCode::OK, "{host}");
+        }
+        for host in [
+            "evil.example:8080",
+            "admin.example.evil.example",
+            "192.168.1.5.evil.example",
+        ] {
+            assert_eq!(status(host).await, StatusCode::FORBIDDEN, "{host}");
         }
     }
 
@@ -4534,7 +4639,7 @@ mod tests {
         );
         state.operator_token_hash = None;
         state.trusted_management = true;
-        let application = operator_router(state, "0.0.0.0:8080".parse().unwrap());
+        let application = operator_router(state, "0.0.0.0:8080".parse().unwrap(), &[]);
         let request = |host: &str| {
             Request::get("/api/status")
                 .header(header::HOST, host)

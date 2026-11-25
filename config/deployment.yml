@@ -211,6 +211,9 @@ spec:
             - /data
             - --http
             - 0.0.0.0:8080
+            # The admin ingress forwards its own host name; other names are refused.
+            - --http-host
+            - admin.iuna.jhx.app
             - --p2p
             - 0.0.0.0:9444
             # This is the bootstrap node itself.
