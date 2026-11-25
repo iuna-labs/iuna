@@ -38,8 +38,9 @@ pub struct Hello {
     /// ignored by older nodes, so peer discovery can return without a protocol flag day.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub known_peers: Vec<String>,
-    /// Random per process, so a node that dialled itself recognizes its own Hello whatever
-    /// address it advertises. Optional and ignored by older nodes, like the fields above.
+    /// Random per session, so a node that dialled itself recognizes its own Hello whatever
+    /// address it advertises, without giving peers an identifier that follows it across
+    /// addresses. Optional and ignored by older nodes, like the fields above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_nonce: Option<u64>,
 }

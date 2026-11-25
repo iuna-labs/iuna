@@ -1,12 +1,12 @@
 //! Tokio TCP transport for the peer state machine.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fs, io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, Mutex as StdMutex, OnceLock, RwLock},
+    sync::{Arc, Mutex as StdMutex, RwLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -271,8 +271,9 @@ pub struct PeerRegistry {
     mutations: Arc<StdMutex<()>>,
     commands: Arc<RwLock<Option<mpsc::UnboundedSender<PeerCommand>>>>,
     store_path: Arc<RwLock<Option<PathBuf>>>,
-    /// This process's Hello nonce, drawn on first use.
-    node_nonce: Arc<OnceLock<u64>>,
+    /// The Hello nonce of every open session. A Hello carrying one of them came from this node
+    /// itself. A fresh nonce per session keeps peers from linking one node across addresses.
+    session_nonces: Arc<StdMutex<HashSet<u64>>>,
     /// Targets whose Hello carried this node's nonce. A node advertising `0.0.0.0` cannot tell its
     /// public address from an endpoint string, so it learns it here and never dials it again.
     own_addresses: Arc<RwLock<BTreeSet<PeerAddress>>>,
@@ -336,14 +337,54 @@ pub fn load_added_peers(path: &Path) -> Result<Vec<PeerAddress>> {
     }
 }
 
+/// A session's Hello nonce, registered while the session lives.
+struct SessionNonce {
+    nonces: Arc<StdMutex<HashSet<u64>>>,
+    nonce: u64,
+}
+
+impl Drop for SessionNonce {
+    fn drop(&mut self) {
+        if let Ok(mut nonces) = self.nonces.lock() {
+            nonces.remove(&self.nonce);
+        }
+    }
+}
+
 impl PeerRegistry {
-    /// The nonce this node puts in every Hello. A Hello carrying it came from this node itself.
-    pub fn node_nonce(&self) -> u64 {
-        *self.node_nonce.get_or_init(|| {
+    /// A fresh nonce for one session's Hello, known to this node until the guard is dropped.
+    fn open_session_nonce(&self) -> SessionNonce {
+        let mut nonces = self
+            .session_nonces
+            .lock()
+            .expect("peer registry lock poisoned");
+        loop {
             let mut bytes = [0; 8];
             getrandom::getrandom(&mut bytes).expect("operating system randomness is available");
-            u64::from_le_bytes(bytes)
-        })
+            let nonce = u64::from_le_bytes(bytes);
+            if nonces.insert(nonce) {
+                return SessionNonce {
+                    nonces: Arc::clone(&self.session_nonces),
+                    nonce,
+                };
+            }
+        }
+    }
+
+    /// Whether a received Hello nonce belongs to one of this node's own open sessions.
+    fn is_own_nonce(&self, nonce: u64) -> bool {
+        self.session_nonces
+            .lock()
+            .expect("peer registry lock poisoned")
+            .contains(&nonce)
+    }
+
+    /// Forgets that `address` reached this node, when the operator adds or removes it again.
+    fn forget_own_address(&self, address: &PeerAddress) {
+        self.own_addresses
+            .write()
+            .expect("peer registry lock poisoned")
+            .remove(address);
     }
 
     /// Remembers that the session behind `peer_key` reached this node itself. An outbound target
@@ -379,6 +420,8 @@ impl PeerRegistry {
     pub fn add_target(&self, address: impl Into<PeerAddress>) -> Result<()> {
         let address = address.into();
         let commands = self.command_sender()?;
+        // Added on purpose, so it is dialled again even if it once reached this node.
+        self.forget_own_address(&address);
         let _mutation = self
             .mutations
             .lock()
@@ -490,6 +533,7 @@ impl PeerRegistry {
     pub fn remove_target(&self, address: impl Into<PeerAddress>) -> Result<()> {
         let address = address.into();
         let commands = self.command_sender()?;
+        self.forget_own_address(&address);
         let _mutation = self
             .mutations
             .lock()
@@ -1063,6 +1107,7 @@ async fn run_connection(
         .context("enabling P2P TCP_NODELAY")?;
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
+    let nonce = peers.open_session_nonce();
     let status = node.lock().await.status();
     write_envelope(
         &mut writer,
@@ -1070,7 +1115,7 @@ async fn run_connection(
             Hello::new(status.height, status.tip)
                 .with_listen_addr(advertisement.get().map(|address| address.to_string()))
                 .with_known_peers(peers.known_peers_for_hello(&peer_key))
-                .with_node_nonce(peers.node_nonce()),
+                .with_node_nonce(nonce.nonce),
         ),
     )
     .await?;
@@ -1118,7 +1163,7 @@ async fn run_connection(
                         Hello::new(status.height, status.tip)
                             .with_listen_addr(advertisement.get().map(|address| address.to_string()))
                             .with_known_peers(peers.known_peers_for_hello(&peer_key))
-                            .with_node_nonce(peers.node_nonce()),
+                            .with_node_nonce(nonce.nonce),
                     ),
                 )
                 .await?;
@@ -1135,7 +1180,7 @@ async fn run_connection(
                 let envelope = decode_line(&line)?;
                 match &envelope {
                     Envelope::Hello(hello) => {
-                        if hello.node_nonce == Some(peers.node_nonce()) {
+                        if hello.node_nonce.is_some_and(|nonce| peers.is_own_nonce(nonce)) {
                             peers.mark_own_session(&peer_key);
                             bail!("connected to this node itself");
                         }
@@ -1756,8 +1801,14 @@ mod tests {
         let registry = PeerRegistry::default();
         let (commands, _received) = mpsc::unbounded_channel();
         *registry.commands.write().unwrap() = Some(commands);
-        assert_eq!(registry.node_nonce(), registry.node_nonce());
-        assert_ne!(registry.node_nonce(), PeerRegistry::default().node_nonce());
+        let first = registry.open_session_nonce();
+        let second = registry.open_session_nonce();
+        assert_ne!(first.nonce, second.nonce);
+        assert!(registry.is_own_nonce(first.nonce) && registry.is_own_nonce(second.nonce));
+        let closed = first.nonce;
+        drop(first);
+        assert!(!registry.is_own_nonce(closed));
+        assert!(!PeerRegistry::default().is_own_nonce(second.nonce));
         let default = "0.0.0.0:9444".parse::<PeerAddress>().unwrap();
         let public = "87.215.225.115:9444";
         let hello = Hello::new(0, crate::consensus::GENESIS_HASH)
@@ -1778,6 +1829,9 @@ mod tests {
         // Inbound sessions name no dialled address, so nothing is remembered for them.
         registry.mark_own_session("inbound:87.215.225.117:50000");
         assert_eq!(registry.own_addresses.read().unwrap().len(), 1);
+        // Added by hand, it is tried again.
+        registry.forget_own_address(&public.parse().unwrap());
+        assert!(registry.own_addresses.read().unwrap().is_empty());
     }
 
     #[test]
