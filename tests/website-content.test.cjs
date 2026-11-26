@@ -1198,14 +1198,97 @@ test('wallet activity infinite scroll stops re-checking when nothing can load', 
   app.activityBusy = true;
   await app.loadMoreActivity();
   assert.equal(ticks, 0, 'a page already in flight must not schedule another check');
+});
 
-  const hidden = { getClientRects: () => [], closest: () => ({ getClientRects: () => [] }) };
-  app.$refs = { activitySentinel: hidden };
-  app.activityBusy = false;
-  let loads = 0;
-  app.loadMoreActivity = () => { loads += 1; };
-  app.loadMoreActivityIfNeeded();
-  assert.equal(loads, 0, 'a hidden sentinel never counts as in view');
+function observedActivity(app) {
+  const calls = [];
+  const timers = [];
+  app.activityObserver = {
+    observe: () => calls.push('observe'),
+    unobserve: () => calls.push('unobserve'),
+  };
+  app.$refs = { activitySentinel: {} };
+  app.$nextTick = (callback) => callback();
+  return { calls, timers };
+}
+
+test('wallet activity re-checks the sentinel exactly once after the list grows', async () => {
+  const { app } = nodeApp();
+  const { calls } = observedActivity(app);
+  app.activity = {
+    public_key: 'wallet',
+    pending: [],
+    confirmed: Array.from({ length: 60 }, (_, index) => ({ kind: 'sent', id: String(index) })),
+    next_before_height: 600,
+  };
+  await app.loadMoreActivity();
+  assert.equal(app.activityVisibleCount, 50);
+  assert.deepEqual(calls, ['unobserve', 'observe']);
+
+  calls.length = 0;
+  app.activityVisibleCount = 60;
+  app.getJson = async () => ({
+    pending: [],
+    confirmed: [{ kind: 'sent', id: 'older', heartbeat_height: 599 }],
+    next_before_height: 400,
+  });
+  await app.loadMoreActivity();
+  assert.equal(app.activityVisibleCount, 85);
+  assert.deepEqual(calls, ['unobserve', 'observe']);
+});
+
+test('wallet activity pages that add nothing visible keep the count and keep loading', async () => {
+  const { app } = nodeApp();
+  const { calls } = observedActivity(app);
+  app.activity = { public_key: 'wallet', pending: [], confirmed: [], next_before_height: 600 };
+  app.activityFilters = { transfers: false, tickets: true, heartbeatRewards: false, ledgerRewards: false };
+  app.getJson = async () => ({
+    pending: [],
+    confirmed: [{ kind: 'sent', id: 'older', heartbeat_height: 599 }],
+    next_before_height: 400,
+  });
+  await app.loadMoreActivity();
+  assert.equal(app.activityVisibleCount, 25);
+  assert.equal(app.activity.next_before_height, 400);
+  assert.deepEqual(calls, ['unobserve', 'observe'], 'the sentinel is still in view, so the next page loads');
+});
+
+test('a failed activity page retries later instead of stalling', async () => {
+  const delays = [];
+  const { app, messages } = nodeApp({ setTimeout: (callback, delay) => { delays.push(delay); callback(); return 1; } });
+  const { calls } = observedActivity(app);
+  app.activity = { public_key: 'wallet', pending: [], confirmed: [], next_before_height: 600 };
+  app.getJson = async () => { throw new Error('node offline'); };
+  await app.loadMoreActivity();
+  assert.equal(messages.at(-1).message, 'node offline');
+  assert.deepEqual(delays, [5000]);
+  assert.deepEqual(calls, ['unobserve', 'observe']);
+  assert.equal(app.activityBusy, false);
+});
+
+test('an activity page that lands after a refresh moved the cursor is dropped', async () => {
+  const { app } = nodeApp();
+  observedActivity(app);
+  app.activity = { public_key: 'wallet', pending: [], confirmed: [], next_before_height: 600 };
+  app.getJson = async () => {
+    // A refresh lands first, with a newer first page.
+    app.activity = { public_key: 'wallet', pending: [], confirmed: [{ kind: 'sent', id: 'new', heartbeat_height: 800 }], next_before_height: 700 };
+    return { pending: [], confirmed: [{ kind: 'sent', id: 'older', heartbeat_height: 599 }], next_before_height: 400 };
+  };
+  await app.loadMoreActivity();
+  assert.deepEqual(app.activity.confirmed.map((item) => item.id), ['new']);
+  assert.equal(app.activity.next_before_height, 700);
+});
+
+test('a replaced activity observer is not revived by a late re-check', () => {
+  const { app } = nodeApp();
+  const { calls } = observedActivity(app);
+  let later;
+  app.$nextTick = (callback) => { later = callback; };
+  app.recheckActivitySentinel();
+  app.activityObserver = { observe: () => {}, unobserve: () => {} };
+  later();
+  assert.deepEqual(calls, []);
 });
 
 test('wallet activity infinite scroll fetches the next Heartbeat page', async () => {

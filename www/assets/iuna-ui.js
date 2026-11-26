@@ -2587,7 +2587,7 @@ window.iunaApp = function iunaApp() {
 
     activityFiltersChanged() {
       this.activityVisibleCount = 25;
-      this.$nextTick(() => this.loadMoreActivityIfNeeded());
+      this.recheckActivitySentinel();
     },
 
     visibleActivityItems() {
@@ -2600,38 +2600,53 @@ window.iunaApp = function iunaApp() {
     },
 
     async loadMoreActivity() {
-      let grew = false;
       if (this.activityVisibleCount < this.filteredActivityItems().length) {
         this.activityVisibleCount += 25;
-        grew = true;
-      } else if (this.activity?.next_before_height != null && !this.activityBusy) {
-        this.activityBusy = true;
-        try {
-          const page = await this.getJson(`/api/wallet/activity?before_height=${this.activity.next_before_height}`);
-          this.applyActivityPage(page, true);
-          this.activityVisibleCount += 25;
-          grew = true;
-        } catch (error) {
-          this.notify(error.message, "error");
-        } finally {
-          this.activityBusy = false;
-        }
+        this.recheckActivitySentinel();
+        return;
       }
-      // Re-check only after the list actually grew, and only once the DOM shows it.
-      // Alpine drains $nextTick callbacks in one synchronous loop, so scheduling the
-      // check unconditionally (while a page is loading or nothing is left) froze the app.
-      if (grew) this.$nextTick(() => requestAnimationFrame(() => this.loadMoreActivityIfNeeded()));
+      // Nothing left, or a page is already loading: that page re-checks when it lands.
+      if (this.activity?.next_before_height == null || this.activityBusy) return;
+      const { public_key: publicKey, next_before_height: beforeHeight } = this.activity;
+      const shown = this.filteredActivityItems().length;
+      let retryAfter = 0;
+      this.activityBusy = true;
+      try {
+        const page = await this.getJson(`/api/wallet/activity?before_height=${beforeHeight}`);
+        // A refresh or another wallet may have moved the cursor while this page loaded.
+        // Appending it then could leave a gap; the re-check loads from the new cursor instead.
+        if (this.activity?.public_key === publicKey && this.activity?.next_before_height === beforeHeight) {
+          this.applyActivityPage(page, true);
+          // Only reveal more rows when the page added some that pass the filters.
+          if (this.filteredActivityItems().length > shown) {
+            this.activityVisibleCount = Math.max(this.activityVisibleCount, shown + 25);
+          }
+        }
+      } catch (error) {
+        this.notify(error.message, "error");
+        retryAfter = 5000;
+      } finally {
+        this.activityBusy = false;
+      }
+      this.recheckActivitySentinel(retryAfter);
     },
 
-    loadMoreActivityIfNeeded() {
+    // Observing the sentinel again makes the observer report its current state once more. A
+    // sentinel still in view after the list grew, or after a failed page, thus loads once more,
+    // and one that scrolled out of view does not. Hidden sentinels never count as in view.
+    recheckActivitySentinel(delay = 0) {
+      const observer = this.activityObserver;
       const sentinel = this.$refs?.activitySentinel;
-      const scroller = sentinel?.closest(".activity-scroll");
-      // A hidden sentinel or tab has no layout box and would always look "in view".
-      if (!sentinel || !scroller || !this.activityHasMore()
-        || !sentinel.getClientRects().length || !scroller.getClientRects().length) return;
-      if (sentinel.getBoundingClientRect().top <= scroller.getBoundingClientRect().bottom + 160) {
-        this.loadMoreActivity();
-      }
+      if (!observer || !sentinel) return;
+      const recheck = () => {
+        // A newer observer replaced this one: observing again would revive the old one.
+        if (observer !== this.activityObserver) return;
+        observer.unobserve(sentinel);
+        observer.observe(sentinel);
+      };
+      // Wait until the DOM shows the new rows, so the sentinel has moved below them.
+      if (delay) setTimeout(recheck, delay);
+      else this.$nextTick(recheck);
     },
 
     observeActivitySentinel(element) {
