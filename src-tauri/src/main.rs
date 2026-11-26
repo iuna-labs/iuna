@@ -3,7 +3,10 @@ use std::{
     fs,
     io::{self, ErrorKind},
     path::Path,
-    sync::{Mutex, OnceLock},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use tauri::{AppHandle, Manager, State, WindowEvent};
@@ -129,14 +132,17 @@ fn main() {
                 }
             }
 
+            // Without a tray, closing the window quits, and quitting stops the node off the
+            // event loop.
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            if matches!(event, WindowEvent::CloseRequested { .. }) {
-                stop_sidecar();
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                _window.app_handle().exit(0);
             }
         })
         .build(tauri::generate_context!())
         .expect("error while building iuna desktop")
-        .run(|_app, event| {
+        .run(|app, event| {
             #[cfg(target_os = "macos")]
             if matches!(
                 &event,
@@ -145,7 +151,29 @@ fn main() {
                     ..
                 }
             ) {
-                show_main_window(_app);
+                show_main_window(app);
+            }
+
+            // Stopping the node can take seconds. It runs on its own thread, so the app does not
+            // hang meanwhile, and the app exits once it is done. A restart cannot be held up;
+            // the update installer stops the node before it restarts.
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = &event
+                && *code != Some(tauri::RESTART_EXIT_CODE)
+                && (STOPPING_NODE.load(Ordering::SeqCst) || sidecar_running())
+            {
+                api.prevent_exit();
+                if !STOPPING_NODE.swap(true, Ordering::SeqCst) {
+                    for window in app.webview_windows().values() {
+                        let _ = window.hide();
+                    }
+                    let app = app.clone();
+                    std::thread::spawn(move || {
+                        stop_sidecar();
+                        STOPPING_NODE.store(false, Ordering::SeqCst);
+                        app.exit(0);
+                    });
+                }
+                return;
             }
 
             if matches!(
@@ -267,7 +295,10 @@ async fn install_desktop_update(
         .await
         .map_err(|error| error.to_string())?;
 
-    stop_sidecar();
+    // Off the async runtime's workers: the node may take seconds to stop.
+    tauri::async_runtime::spawn_blocking(stop_sidecar)
+        .await
+        .map_err(|error| error.to_string())?;
     if let Err(error) = update.install(bytes) {
         // The app keeps running on the old version, so it needs its node back.
         *pending.0.lock().map_err(|_| "updater mutex poisoned")? = Some(update);
@@ -336,6 +367,15 @@ fn show_main_window(app: &tauri::AppHandle) {
     {
         eprintln!("iuna desktop could not show its window: {error}");
     }
+}
+
+/// Set while a quit waits for the node to stop.
+static STOPPING_NODE: AtomicBool = AtomicBool::new(false);
+
+fn sidecar_running() -> bool {
+    SIDECAR
+        .get()
+        .is_some_and(|sidecar| sidecar.0.lock().expect("sidecar mutex poisoned").is_some())
 }
 
 fn stop_sidecar() {
