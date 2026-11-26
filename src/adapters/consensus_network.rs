@@ -1196,8 +1196,8 @@ async fn run_connection(
     let mut read_deadline = Instant::now() + HELLO_TIMEOUT;
     // Lives outside the select loop: a partial line survives when another branch wins the race.
     let mut partial_line = Vec::new();
-    // When the unfinished line in `partial_line` was first seen. The loop wakes at least once per
-    // advertisement interval, so a stalled line is noticed within that much of its deadline.
+    // When the unfinished line in `partial_line` started. The read branch returns as soon as a
+    // line starts, so its timer runs from the first byte.
     let mut line_started: Option<Instant> = None;
     let mut peer_advertisement = tokio::time::interval_at(
         Instant::now() + PEER_ADVERTISEMENT_INTERVAL,
@@ -1239,13 +1239,15 @@ async fn run_connection(
                 )
                 .await?;
             }
-            line = read_bounded_line(
+            read = read_line_part(
                 &mut reader,
                 &mut partial_line,
                 if session.remote_hello().is_some() { MAX_WIRE_LINE_BYTES } else { MAX_HELLO_LINE_BYTES },
             ) => {
-                let Some(line) = line? else {
-                    return Ok(());
+                let line = match read? {
+                    LineRead::Line(line) => line,
+                    LineRead::Started => continue,
+                    LineRead::Closed => return Ok(()),
                 };
                 read_deadline = Instant::now() + IDLE_TIMEOUT;
                 let envelope = decode_line(&line)?;
@@ -1507,16 +1509,46 @@ async fn write_envelope(writer: &mut (impl AsyncWrite + Unpin), envelope: &Envel
 
 /// Cancel-safe: consumed bytes move into `line` without an intervening await, so dropping this
 /// future and calling it again with the same buffer resumes the line.
+#[derive(Debug, PartialEq)]
+enum LineRead {
+    Line(Vec<u8>),
+    /// Bytes of a new line arrived, but not its end yet.
+    Started,
+    Closed,
+}
+
+#[cfg(test)]
 async fn read_bounded_line(
     reader: &mut (impl AsyncBufRead + Unpin),
     line: &mut Vec<u8>,
     limit: usize,
 ) -> Result<Option<Vec<u8>>> {
     loop {
+        match read_line_part(reader, line, limit).await? {
+            LineRead::Line(line) => return Ok(Some(line)),
+            LineRead::Started => {}
+            LineRead::Closed => return Ok(None),
+        }
+    }
+}
+
+/// Reads into `line` until it ends, and also returns once a new line starts, so the caller can
+/// time how long the line takes. Cancelling it keeps the bytes read so far in `line`.
+async fn read_line_part(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    line: &mut Vec<u8>,
+    limit: usize,
+) -> Result<LineRead> {
+    loop {
         let buffer = reader.fill_buf().await.context("reading P2P envelope")?;
         if buffer.is_empty() {
-            return Ok((!line.is_empty()).then(|| std::mem::take(line)));
+            return Ok(if line.is_empty() {
+                LineRead::Closed
+            } else {
+                LineRead::Line(std::mem::take(line))
+            });
         }
+        let starts = line.is_empty();
         let consumed = buffer
             .iter()
             .position(|byte| *byte == b'\n')
@@ -1530,7 +1562,10 @@ async fn read_bounded_line(
         let complete = line.last() == Some(&b'\n');
         reader.consume(consumed);
         if complete {
-            return Ok(Some(std::mem::take(line)));
+            return Ok(LineRead::Line(std::mem::take(line)));
+        }
+        if starts {
+            return Ok(LineRead::Started);
         }
     }
 }
@@ -2202,6 +2237,34 @@ mod tests {
                 .await
                 .unwrap(),
             Some(b"hello\n".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_started_line_is_reported_before_it_ends() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        writer.write_all(b"hel").await.unwrap();
+        assert_eq!(
+            read_line_part(&mut reader, &mut line, MAX_WIRE_LINE_BYTES)
+                .await
+                .unwrap(),
+            LineRead::Started
+        );
+        writer.write_all(b"lo\n").await.unwrap();
+        assert_eq!(
+            read_line_part(&mut reader, &mut line, MAX_WIRE_LINE_BYTES)
+                .await
+                .unwrap(),
+            LineRead::Line(b"hello\n".to_vec())
+        );
+        drop(writer);
+        assert_eq!(
+            read_line_part(&mut reader, &mut line, MAX_WIRE_LINE_BYTES)
+                .await
+                .unwrap(),
+            LineRead::Closed
         );
     }
 
