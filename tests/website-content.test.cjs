@@ -497,6 +497,30 @@ test('transfers are only signed after review, within the spendable balance', () 
   assert.equal(app.pendingTransfer, null);
 });
 
+test('transfers stay within what one transaction can spend', () => {
+  const { app, messages } = nodeApp();
+  app.status = {
+    management_enabled: true,
+    wallet_unlocked: true,
+    wallet_spendable_balance: 500_000_000,
+    wallet_transfer_limit: { inputs: 3850, value: 300_000_000, minimum_fee: 524 },
+  };
+  app.transfer.recipient = 'ab'.repeat(32);
+  app.transfer.fee = '0.00000001';
+  app.useMaximumAmount();
+  assert.equal(app.transfer.fee, '0.00000524', 'Max raises the fee to the relay minimum');
+  assert.equal(app.transfer.amount, '2.99999476');
+  assert.ok(messages.some(({ message }) => /at most 3850 outputs/.test(message)));
+  app.reviewTransaction();
+  assert.equal(app.pendingTransfer.amount + app.pendingTransfer.fee, 300_000_000);
+
+  app.pendingTransfer = null;
+  app.transfer.amount = '3';
+  app.reviewTransaction();
+  assert.equal(app.pendingTransfer, null);
+  assert.match(messages.at(-1).message, /at most 3850 outputs, holding 3 IUNA/);
+});
+
 test('command-number shortcuts open sidebar screens only when no dialog is open', () => {
   const { app } = nodeApp();
   let prevented = 0;
@@ -1072,10 +1096,22 @@ test('wallet activity includes mining rewards and UTXOs open separately', async 
   assert.equal(app.activityLabel({ kind: 'ledger_reward' }), 'Ledger reward');
   assert.equal(app.activitySign({ kind: 'heartbeat_reward' }), '+');
   assert.equal(app.activitySign({ kind: 'ledger_reward' }), '+');
-  app.getJson = async () => ({ utxos: [{ transaction_id: 'aa', output_index: 0 }] });
+  const requests = [];
+  let tip = 't1';
+  app.getJson = async (path) => {
+    requests.push(path);
+    const offset = Number(new URL(path, 'http://node').searchParams.get('offset') || 0);
+    return { public_key: 'k', tip_hash: tip, total: 3, utxos: [{ transaction_id: 'aa', output_index: offset }], next_offset: offset < 2 ? offset + 1 : null };
+  };
   await app.openUtxos();
   assert.equal(app.walletView, 'utxos');
-  assert.equal(app.activity.utxos.length, 1);
+  assert.equal(app.utxoPage.utxos.length, 1);
+  await app.loadUtxos(true);
+  assert.deepEqual([...app.utxoPage.utxos.map((utxo) => utxo.output_index)], [0, 1]);
+  tip = 't2';
+  await app.loadUtxos(true);
+  assert.equal(requests.at(-1), '/api/wallet/utxos?limit=202', 'a new tip reloads from the first output, one page further');
+  assert.equal(app.utxoPage.tip_hash, 't2');
 
   const html = content('www/node.html');
   assert.match(html, /@click="openUtxos\(\)">UTXOs/);

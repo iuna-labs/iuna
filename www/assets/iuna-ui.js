@@ -67,6 +67,10 @@ window.iunaApp = function iunaApp() {
     // Which list the wallet's right-hand panel shows: activity, contacts, utxos or addresses.
     walletView: "activity",
     utxosBusy: false,
+    utxosLoading: false,
+    // Pages of /api/wallet/utxos, largest output first: { public_key, tip_hash, total, utxos, next_offset }.
+    utxoPage: null,
+    utxoPageKey: null,
     walletAddresses: null,
     walletAddressesBusy: false,
     walletAddressesError: null,
@@ -763,6 +767,7 @@ window.iunaApp = function iunaApp() {
         if (status.wallet_public_key && this.tab === "wallet") {
           const activity = await this.getJson("/api/wallet/activity").catch(() => null);
           if (activity) this.applyActivityPage(activity, false);
+          if (this.walletView === "utxos" && this.utxoPageKey !== this.utxoStatusKey()) await this.loadUtxos(false);
         }
         if (!this.mining.busy) {
           this.mining.message = status.heartbeat_mining_enabled
@@ -989,6 +994,8 @@ window.iunaApp = function iunaApp() {
         const fee = this.parseAmount(this.transfer.fee);
         const spendable = Number(this.status.wallet_spendable_balance || 0);
         if (amount + fee > spendable) throw new Error("Amount plus fee exceeds the spendable balance");
+        const limit = this.status.wallet_transfer_limit;
+        if (limit && amount + fee > Number(limit.value)) throw new Error(this.transferLimitMessage(limit));
         this.pendingTransfer = { recipient, amount, fee, remaining: spendable - amount - fee };
         this.$nextTick(() => this.$refs.confirmTransfer?.focus());
       } catch (error) {
@@ -1018,15 +1025,32 @@ window.iunaApp = function iunaApp() {
       }
     },
 
+    // A wallet with more spendable outputs than one transaction holds can send only its largest
+    // ones at once, and spending many inputs raises the relay minimum fee.
     useMaximumAmount() {
       try {
-        const fee = this.parseAmount(this.transfer.fee);
-        const maximum = Number(this.status.wallet_spendable_balance || 0) - fee;
+        const entered = this.parseAmount(this.transfer.fee);
+        const limit = this.status.wallet_transfer_limit;
+        const fee = Math.max(entered, Number(limit?.minimum_fee || 0));
+        const available = limit ? Number(limit.value) : Number(this.status.wallet_spendable_balance || 0);
+        const maximum = available - fee;
         if (maximum <= 0) throw new Error("The spendable balance does not cover the fee");
         this.transfer.amount = this.amountLabel(maximum);
+        if (fee > entered) {
+          this.transfer.fee = this.amountLabel(fee);
+          this.notify(`Fee raised to ${this.amountLabel(fee)} IUNA, the relay minimum for spending ${limit.inputs} outputs`);
+        }
+        if (available < Number(this.status.wallet_spendable_balance || 0)) {
+          this.notify(this.transferLimitMessage(limit));
+        }
       } catch (error) {
         this.notify(error.message, "error");
       }
+    },
+
+    transferLimitMessage(limit) {
+      return `One transaction can spend at most ${limit.inputs} outputs, holding ${this.amountLabel(limit.value)} IUNA with the fee. `
+        + "Send the rest in another transaction, or let continuous Ledger mining consolidate small outputs first.";
     },
 
     async setHeartbeatMining(enabled) {
@@ -2655,13 +2679,48 @@ window.iunaApp = function iunaApp() {
 
     async openUtxos() {
       this.walletView = "utxos";
-      if (this.activity || this.utxosBusy) return;
-      this.utxosBusy = true;
+      this.utxoPage = null;
+      this.utxoPageKey = null;
+      await this.loadUtxos(false);
+    },
+
+    // "More" appends the next page of the same tip. A reload, or a new tip in between, starts
+    // again from the first output with as many rows as were shown, so none is listed twice.
+    // Reload on a new tip, another wallet, or a mempool change that reserves outputs.
+    utxoStatusKey() {
+      return `${this.status.wallet_public_key}:${this.status.tip_hash}:${this.status.wallet_spendable_utxos}`;
+    },
+
+    async loadUtxos(more) {
+      const current = this.utxoPage;
+      if (this.utxosLoading) {
+        // A load is already running; show the spinner if the pane was just emptied for it.
+        if (!current) this.utxosBusy = true;
+        return;
+      }
+      if (more && current?.next_offset == null) return;
+      // Recorded only once the load succeeds, so a failed or skipped reload is retried by the
+      // next poll.
+      const key = this.utxoStatusKey();
+      this.utxosLoading = true;
+      this.utxosBusy = !current;
       try {
-        this.activity = await this.getJson("/api/wallet/activity");
+        if (more) {
+          const page = await this.getJson(`/api/wallet/utxos?offset=${current.next_offset}`);
+          if (page.tip_hash === current.tip_hash && page.public_key === current.public_key) {
+            this.utxoPage = { ...page, utxos: [...current.utxos, ...page.utxos] };
+            this.utxoPageKey = key;
+            return;
+          }
+        }
+        const rows = Math.min(1000, Math.max(200, (current?.utxos.length || 0) + (more ? 200 : 0)));
+        this.utxoPage = await this.getJson(`/api/wallet/utxos?limit=${rows}`);
+        this.utxoPageKey = key;
       } catch (error) {
-        this.notify(error.message, "error");
+        // A background reload fails quietly; the next poll tries again.
+        if (more || !current) this.notify(error.message, "error");
       } finally {
+        this.utxosLoading = false;
         this.utxosBusy = false;
       }
     },

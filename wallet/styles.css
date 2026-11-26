@@ -75,6 +75,7 @@ code { overflow-wrap: anywhere; color: var(--muted); font-family: inherit; font-
 .stat { min-width: 0; padding: 10px 12px; background: var(--bg); }
 .stat span { display: block; color: var(--muted-2); font-size: 10.5px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; }
 .stat strong { display: block; margin-top: 3px; color: var(--text); font-size: 14px; font-weight: 500; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.stat small { display: block; margin-top: 3px; color: var(--muted-2); font-size: 11px; }
 .address { border: 1px solid var(--line); border-radius: var(--radius); padding: 9px 12px; background: var(--bg); }
 .send { display: grid; gap: 10px; margin-top: 18px; }
 .toast { position: fixed; z-index: 80; top: 12px; left: 50%; transform: translateX(-50%); display: none; align-items: center; gap: 10px; width: max-content; max-width: min(560px, calc(100% - 32px)); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 8px 14px 8px 12px; background: var(--panel-3); color: var(--text); font-size: 13px; font-weight: 500; box-shadow: 0 12px 32px rgba(0,0,0,.45); }

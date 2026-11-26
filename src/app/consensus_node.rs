@@ -32,6 +32,16 @@ const MAX_PENDING_CANDIDATES: usize = 256;
 // Header encoding is currently below 256 bytes. Reserving twice that amount keeps mempool policy
 // independent of future non-consensus header fields while `mine_child` remains the exact check.
 const HEARTBEAT_TEMPLATE_OVERHEAD_BYTES: usize = 512;
+// The signed candidate header is also below 256 bytes; the same margin applies to Ledger blocks.
+const LEDGER_TEMPLATE_OVERHEAD_BYTES: usize = 512;
+/// Largest Ledger transaction a block template can still hold next to the candidate header, the
+/// transaction count and its own length prefix. A larger one would wait in the mempool forever.
+pub const MAX_LEDGER_TRANSACTION_BYTES: usize =
+    MAX_LEDGER_SIDECAR_BYTES - LEDGER_TEMPLATE_OVERHEAD_BYTES - 2 * std::mem::size_of::<u32>();
+/// Largest ticket a Heartbeat template can still hold next to the ticket count and its own
+/// length prefix.
+pub const MAX_TICKET_BYTES: usize =
+    MAX_HEARTBEAT_BLOCK_BYTES - HEARTBEAT_TEMPLATE_OVERHEAD_BYTES - 2 * std::mem::size_of::<u32>();
 
 /// Persistence port. The application owns commit/rollback ordering; SQLite remains an adapter.
 pub trait ChainRepository {
@@ -550,7 +560,7 @@ impl<R: ChainRepository> Node<R> {
         // A transaction that cannot fit in a Ledger block can never be mined, and its size is
         // what signature checking costs, so it is refused before any of that work.
         let size = transaction.canonical_size();
-        if size > MAX_LEDGER_SIDECAR_BYTES {
+        if size > MAX_LEDGER_TRANSACTION_BYTES {
             bail!("Ledger transaction is larger than a Ledger block");
         }
         self.ensure_inputs_available(&inputs)?;
@@ -606,7 +616,7 @@ impl<R: ChainRepository> Node<R> {
             .iter()
             .map(|input| input.previous_output.clone())
             .collect::<Vec<_>>();
-        if ticket.canonical_size() > MAX_HEARTBEAT_BLOCK_BYTES {
+        if ticket.canonical_size() > MAX_TICKET_BYTES {
             bail!("mining ticket is larger than a Heartbeat block");
         }
         self.ensure_inputs_available(&inputs)?;
@@ -803,26 +813,14 @@ impl<R: ChainRepository> Node<R> {
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
 
-        let empty_sidecar = Sidecar {
-            header: CandidateHeader {
-                version: PROTOCOL_VERSION,
-                lottery_heartbeat: [0; 32],
-                lottery_height: 0,
-                parent_anchor: [0; 32],
-                ticket_id: [0; 32],
-                slot: 0,
-                lottery_output: [0; 32],
-                transactions_root: merkle_root(&[]),
-                signature: Vec::new(),
-            },
-            transactions: Vec::new(),
-        };
+        // Like Heartbeat templates, reserve the header up front: the winner's signature is added
+        // after selection, so counting an unsigned header could overfill the signed block.
         select_template(
             &candidates,
             Template {
                 capacity: usize::MAX,
-                used_bytes: empty_sidecar.canonical_size(),
-                byte_limit: MAX_LEDGER_SIDECAR_BYTES,
+                used_bytes: std::mem::size_of::<u32>(),
+                byte_limit: MAX_LEDGER_SIDECAR_BYTES - LEDGER_TEMPLATE_OVERHEAD_BYTES,
             },
             |transaction| {
                 transaction
@@ -1172,6 +1170,30 @@ mod tests {
         0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
         0x7f, 0x60,
     ];
+
+    #[test]
+    fn template_overheads_cover_the_signed_headers() {
+        let sidecar = Sidecar {
+            header: CandidateHeader {
+                version: PROTOCOL_VERSION,
+                lottery_heartbeat: [0; 32],
+                lottery_height: u64::MAX,
+                parent_anchor: [0; 32],
+                ticket_id: [0; 32],
+                slot: u64::MAX,
+                lottery_output: [0; 32],
+                transactions_root: merkle_root(&[]),
+                signature: vec![0; 64],
+            },
+            transactions: Vec::new(),
+        };
+        // The empty sidecar already holds its transaction count.
+        assert!(sidecar.canonical_size() <= LEDGER_TEMPLATE_OVERHEAD_BYTES);
+        // The largest admitted transaction is exactly what a template still selects on its own.
+        let template_room = MAX_LEDGER_SIDECAR_BYTES - LEDGER_TEMPLATE_OVERHEAD_BYTES;
+        assert_eq!(4 + 4 + MAX_LEDGER_TRANSACTION_BYTES, template_room);
+        assert_eq!(4 + 4 + MAX_TICKET_BYTES, MAX_HEARTBEAT_BLOCK_BYTES - 512);
+    }
 
     #[derive(Clone, Default)]
     struct MemoryRepository {

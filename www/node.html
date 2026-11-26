@@ -271,6 +271,7 @@
     .pane-list { max-height: max(280px, calc(100vh - 500px)); margin: 0 -16px -16px; }
     .utxo-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; border-bottom: 1px solid var(--line); padding: 8px 16px; line-height: 20px; }
     .utxo-row code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .utxo-more { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 16px; }
     .pane-list .wallet-address-row { padding: 8px 16px; }
     .pane-list > :last-child { border-bottom: 0; }
     .contact-list { max-height: none; margin: -16px -16px 16px; }
@@ -712,10 +713,11 @@
               <h3 class="pane-title" id="utxo-title">Unspent outputs</h3>
               <div class="list-head"><span>Output<span x-show="status.wallet_spendable_utxos !== status.wallet_utxos" x-text="` · ${status.wallet_spendable_utxos ?? 0} of ${status.wallet_utxos ?? 0} spendable now`"></span></span><span>Value</span></div>
               <div class="detail-loading" x-show="utxosBusy">Loading unspent outputs…</div>
-              <div class="tx-scroll-list pane-list" x-show="!utxosBusy && activity?.utxos.length">
-                <template x-for="utxo in activity?.utxos || []" :key="`${utxo.transaction_id}:${utxo.output_index}`"><div class="utxo-row"><code :title="`${utxo.transaction_id}:${utxo.output_index}`" x-text="`${utxo.transaction_id}:${utxo.output_index}`"></code><span class="pill" x-show="utxo.reserved">Reserved</span><span class="tx-value money"><span x-text="amountLabel(utxo.value)"></span> <span class="unit">IUNA</span></span></div></template>
+              <div class="tx-scroll-list pane-list" x-show="!utxosBusy && utxoPage?.utxos.length">
+                <template x-for="utxo in utxoPage?.utxos || []" :key="`${utxo.transaction_id}:${utxo.output_index}`"><div class="utxo-row"><code :title="`${utxo.transaction_id}:${utxo.output_index}`" x-text="`${utxo.transaction_id}:${utxo.output_index}`"></code><span class="pill" x-show="utxo.reserved">Reserved</span><span class="tx-value money"><span x-text="amountLabel(utxo.value)"></span> <span class="unit">IUNA</span></span></div></template>
+                <div class="utxo-more" x-show="utxoPage?.next_offset != null"><span class="muted" x-text="`Largest first · showing ${utxoPage?.utxos.length ?? 0} of ${utxoPage?.total ?? 0}`"></span><button type="button" @click="loadUtxos(true)">Show more</button></div>
               </div>
-              <div class="empty" x-show="!utxosBusy && activity && !activity.utxos.length">No unspent outputs.</div>
+              <div class="empty" x-show="!utxosBusy && utxoPage && !utxoPage.utxos.length">No unspent outputs.</div>
             </div>
             <div class="addresses-pane" x-show="walletView === 'addresses'" role="tabpanel" aria-labelledby="wallet-addresses-title">
               <h3 class="pane-title" id="wallet-addresses-title">Wallet addresses</h3>

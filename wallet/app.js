@@ -1,8 +1,8 @@
 import { generateMnemonic, mnemonicEntropy, validateMnemonic } from "./mnemonic.js";
 import {
   apiEndpoint, buildSignedTransaction, decryptWallet, defaultApiEndpoint, encryptWallet, fetchBlockRewards,
-  fetchWalletView, fetchWalletActivity, formatIuna, nextChangeIndex, parseIuna, submitTransaction,
-  walletFromEntropy,
+  fetchWalletView, fetchWalletActivity, formatIuna, maximumTransfer, nextChangeIndex, parseIuna,
+  planTransfer, submitTransaction, walletFromEntropy,
 } from "./wallet-core.js";
 
 const app = document.querySelector("#app");
@@ -126,7 +126,7 @@ function renderBackup(seedPhrase) {
 
 function renderConfirm() {
   const spendable = Number(view.spendable_balance) - pendingTransfer.amount - pendingTransfer.fee;
-  app.innerHTML = shell(`<h1>Confirm transfer</h1><p>Check the full recipient address. Ledger transactions cannot be reversed.</p><div class="address"><span class="label">Recipient</span><code>${escape(pendingTransfer.recipient)}</code></div><div class="stats"><div class="stat"><span>Amount</span><strong>${escape(formatIuna(pendingTransfer.amount))} IUNA</strong></div><div class="stat"><span>Fee</span><strong>${escape(formatIuna(pendingTransfer.fee))} IUNA</strong></div><div class="stat"><span>Spendable after</span><strong>${escape(formatIuna(Math.max(0, spendable)))} IUNA</strong></div></div><div class="actions"><button data-action="cancel-transfer">Cancel</button><button class="primary" data-action="confirm-transfer">Sign and send</button></div>`);
+  app.innerHTML = shell(`<h1>Confirm transfer</h1><p>Check the full recipient address. Ledger transactions cannot be reversed.</p><div class="address"><span class="label">Recipient</span><code>${escape(pendingTransfer.recipient)}</code></div><div class="stats"><div class="stat"><span>Amount</span><strong>${escape(formatIuna(pendingTransfer.amount))} IUNA</strong></div><div class="stat"><span>Fee</span><strong>${escape(formatIuna(pendingTransfer.fee))} IUNA</strong>${pendingTransfer.raised ? `<small>Raised to the relay minimum for ${pendingTransfer.inputs} inputs</small>` : ""}</div><div class="stat"><span>Spendable after</span><strong>${escape(formatIuna(Math.max(0, spendable)))} IUNA</strong></div></div><div class="actions"><button data-action="cancel-transfer">Cancel</button><button class="primary" data-action="confirm-transfer">Sign and send</button></div>`);
 }
 
 const ACTIVITY_LABELS = {
@@ -433,7 +433,8 @@ async function refresh(silent = false) {
 
 async function sendPendingTransfer() {
   const transfer = pendingTransfer;
-  const transaction = await buildSignedTransaction({ wallet, utxos: view.utxos, changeIndex: view.change_index, ...transfer });
+  const { recipient, amount, fee } = transfer;
+  const transaction = await buildSignedTransaction({ wallet, utxos: view.utxos, changeIndex: view.change_index, recipient, amount, fee });
   const result = await submitTransaction(apiEndpoint(), transaction);
   // A second send before the next refresh must not reuse this change address.
   if (transaction.outputs.length > 1) view.change_index = nextChangeIndex(view.change_index);
@@ -461,10 +462,11 @@ app.addEventListener("click", async (event) => {
     if (action === "backup") showScreen(renderBackupUnlock);
     if (action === "copy") { await copyText(button.dataset.value); toast("Copied"); }
     if (action === "max") {
-      const fee = parseIuna(app.querySelector("#send [name=fee]").value);
-      const maximum = Number(view.spendable_balance) - fee;
-      if (maximum <= 0) throw new Error("The spendable balance does not cover the fee");
-      app.querySelector("#send [name=amount]").value = formatIuna(maximum);
+      const feeField = app.querySelector("#send [name=fee]");
+      const maximum = maximumTransfer(view.utxos, parseIuna(feeField.value));
+      app.querySelector("#send [name=amount]").value = formatIuna(maximum.amount);
+      feeField.value = formatIuna(maximum.fee);
+      if (maximum.limited) toast(`One transaction spends at most ${maximum.inputs} outputs; send the rest separately`);
     }
     if (action === "cancel-transfer") { pendingTransfer = null; renderDashboard("send"); }
     if (action === "confirm-transfer") { button.disabled = true; await sendPendingTransfer(); }
@@ -532,7 +534,8 @@ app.addEventListener("submit", async (event) => {
       const fee = parseIuna(form.fee.value);
       if (amount <= 0) throw new Error("Enter an amount above zero");
       if (amount + fee > Number(view.spendable_balance)) throw new Error("Amount plus fee exceeds the spendable balance");
-      pendingTransfer = { recipient, amount, fee };
+      const plan = planTransfer({ utxos: view.utxos, amount, fee });
+      pendingTransfer = { recipient, amount, fee: plan.fee, raised: plan.raised, inputs: plan.selected.length };
       showScreen(renderConfirm);
       return;
     }

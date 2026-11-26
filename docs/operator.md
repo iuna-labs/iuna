@@ -72,11 +72,15 @@ routes need no token, so polling never sends it.
 - `GET /api/mempool` returns pending Ledger transactions and Heartbeat mining
   tickets in separate arrays so the Chain screen can present both layers in a
   single overview.
-- `GET /api/wallet/activity` returns the node wallet's UTXOs, its pending
-  transactions and tickets, and one 200-Heartbeat page of confirmed activity:
-  what it sent, received or spent on tickets, plus Heartbeat and Ledger rewards
-  won by this wallet. Pass `next_before_height` as the `before_height` query
-  parameter to continue chronologically towards genesis.
+- `GET /api/wallet/activity` returns the node wallet's pending transactions and
+  tickets, and one 200-Heartbeat page of confirmed activity: what it sent,
+  received or spent on tickets, plus Heartbeat and Ledger rewards won by this
+  wallet. Pass `next_before_height` as the `before_height` query parameter to
+  continue chronologically towards genesis.
+- `GET /api/wallet/utxos` returns the node wallet's unspent outputs, largest
+  first, which is also the order transfers spend them in. It pages with
+  `offset` and `limit` (default `200`, maximum `1000`); `total` counts every
+  output and `next_offset` is `null` on the last page.
 - `GET /api/peer-targets` lists the outbound peers the node keeps dialling,
   with their source, connection state and latest error.
 - `GET /api/mining-ticket-quote?duration=60` returns the consensus minimum

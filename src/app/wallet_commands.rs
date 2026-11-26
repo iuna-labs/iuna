@@ -13,11 +13,13 @@ use ed25519_dalek::{Signer, SigningKey};
 
 use crate::consensus::{
     Address, Amount, ConsensusState, Hash, Input, OutPoint, Output, PROTOCOL_VERSION, PublicKey,
-    Sidecar, TicketInput, TicketTransaction, Transaction, address_from_public_key, input_values,
-    tagged_hash, validate_pending_ticket, validate_pending_transaction,
+    Sidecar, TicketInput, TicketTransaction, Transaction, UNITS_PER_IUNA, address_from_public_key,
+    input_values, tagged_hash, validate_pending_ticket, validate_pending_transaction,
 };
 
-use super::consensus_node::{ChainRepository, Node};
+use super::consensus_node::{
+    ChainRepository, MAX_LEDGER_TRANSACTION_BYTES, MAX_TICKET_BYTES, Node, minimum_relay_fee,
+};
 
 /// Keeps automatic consolidation tickets comfortably below the 16 KiB Heartbeat limit while
 /// still collapsing dust at each ten-Heartbeat purchase.
@@ -29,6 +31,75 @@ const BROWSER_WALLET_GAP_LIMIT: u32 = 20;
 /// Change goes to indexes below this, so a browser wallet's gap scan never has to pass the scan
 /// limit. Once every index here has been used, change reuses an address that holds nothing.
 pub const WALLET_CHANGE_ADDRESS_LIMIT: u32 = WALLET_ADDRESS_SCAN_LIMIT - BROWSER_WALLET_GAP_LIMIT;
+
+/// Canonical bytes of one signed input, the same in tickets and Ledger transactions: the outpoint
+/// (32 + 4), the public key (32) and the length-prefixed Ed25519 signature (4 + 64).
+const SIGNED_INPUT_BYTES: usize = 136;
+const OUTPUT_BYTES: usize = 40;
+/// A Ledger transaction's version, input count and output count.
+const TRANSACTION_FIXED_BYTES: usize = 10;
+/// A ticket's version, input count, budget, duration, mining key, lottery seed and change flag.
+const TICKET_FIXED_BYTES: usize = 87;
+
+/// Canonical size of a signed Ledger transaction with these many inputs and outputs.
+pub fn transaction_size(inputs: usize, outputs: usize) -> usize {
+    TRANSACTION_FIXED_BYTES + inputs * SIGNED_INPUT_BYTES + outputs * OUTPUT_BYTES
+}
+
+/// Most inputs one Ledger transaction with `outputs` outputs can spend and still be mined.
+pub fn max_transaction_inputs(outputs: usize) -> usize {
+    (MAX_LEDGER_TRANSACTION_BYTES - TRANSACTION_FIXED_BYTES - outputs * OUTPUT_BYTES)
+        / SIGNED_INPUT_BYTES
+}
+
+/// Most inputs a transfer spends. It allows for change, so sending exactly a `TransferLimit`
+/// value, which needs none, selects the same inputs.
+pub fn max_transfer_inputs() -> usize {
+    max_transaction_inputs(2)
+}
+
+/// Most inputs one ticket with change can spend and still fit in a Heartbeat.
+pub fn max_ticket_inputs() -> usize {
+    (MAX_TICKET_BYTES - TICKET_FIXED_BYTES - OUTPUT_BYTES) / SIGNED_INPUT_BYTES
+}
+
+/// The most the wallet can move in one Ledger transaction: its largest spendable outputs, as many
+/// as transfer selection spends at once.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TransferLimit {
+    pub inputs: usize,
+    pub value: Amount,
+    /// The relay minimum for a transaction spending all of those inputs to one recipient.
+    pub minimum_fee: Amount,
+}
+
+impl TransferLimit {
+    pub fn from_values(mut values: Vec<Amount>) -> Self {
+        values.sort_unstable_by(|left, right| right.cmp(left));
+        values.truncate(max_transfer_inputs());
+        let inputs = values.len();
+        Self {
+            inputs,
+            value: values.into_iter().fold(0, Amount::saturating_add),
+            minimum_fee: if inputs == 0 {
+                0
+            } else {
+                minimum_relay_fee(transaction_size(inputs, 1))
+            },
+        }
+    }
+}
+
+/// An amount in IUNA for messages, without trailing zeros.
+fn iuna_label(units: Amount) -> String {
+    let whole = units / UNITS_PER_IUNA;
+    let fraction = units % UNITS_PER_IUNA;
+    if fraction == 0 {
+        return whole.to_string();
+    }
+    let digits = format!("{fraction:08}");
+    format!("{whole}.{}", digits.trim_end_matches('0'))
+}
 
 const RECEIVE_BRANCH: u8 = 0;
 const CHANGE_BRANCH: u8 = 1;
@@ -132,7 +203,13 @@ impl Wallet {
         let required = amount
             .checked_add(fee)
             .ok_or_else(|| anyhow::anyhow!("amount overflow"))?;
-        let (selected, total) = self.select_inputs(state, reserved_inputs, required)?;
+        let (selected, total) = self.select_inputs(
+            state,
+            reserved_inputs,
+            required,
+            max_transfer_inputs(),
+            "This transfer",
+        )?;
         let mut outputs = vec![Output {
             owner: recipient,
             value: amount,
@@ -211,7 +288,13 @@ impl Wallet {
             .budget
             .checked_add(parameters.fee)
             .ok_or_else(|| anyhow::anyhow!("amount overflow"))?;
-        let (points, total) = self.select_inputs(state, reserved_inputs, required)?;
+        let (points, total) = self.select_inputs(
+            state,
+            reserved_inputs,
+            required,
+            max_ticket_inputs(),
+            "This ticket",
+        )?;
         self.build_ticket_from_inputs(state, parameters, required, points, total, None)
     }
 
@@ -364,31 +447,59 @@ impl Wallet {
         Ok(total.saturating_sub(fee))
     }
 
+    /// Largest outputs first: the fewest inputs keep the object small and its fee low. The small
+    /// outputs this leaves behind are what continuous Ledger mining consolidates.
     fn select_inputs(
         &self,
         state: &ConsensusState,
         reserved_inputs: &BTreeSet<OutPoint>,
         required: Amount,
+        max_inputs: usize,
+        object: &str,
     ) -> Result<(Vec<(OutPoint, SigningKey)>, Amount)> {
         let keys = self.keyring();
+        let mut available = state
+            .utxos
+            .iter()
+            .filter(|(point, _)| !reserved_inputs.contains(*point))
+            .filter_map(|(point, output)| {
+                keys.get(&output.owner)
+                    .map(|key| (point, output.value, key))
+            })
+            .collect::<Vec<_>>();
+        let available_total = available.iter().try_fold(0_u64, |total, (_, value, _)| {
+            total
+                .checked_add(*value)
+                .ok_or_else(|| anyhow::anyhow!("balance overflow"))
+        })?;
+        if available_total < required {
+            bail!("insufficient available balance");
+        }
+        available.sort_unstable_by(
+            |(left_point, left_value, _), (right_point, right_value, _)| {
+                right_value
+                    .cmp(left_value)
+                    .then_with(|| left_point.cmp(right_point))
+            },
+        );
         let mut points = Vec::new();
-        let mut total = 0u64;
-        for (point, output) in &state.utxos {
-            let Some(key) = keys.get(&output.owner) else {
-                continue;
-            };
-            if reserved_inputs.contains(point) {
-                continue;
+        let mut total = 0_u64;
+        for (point, value, key) in available {
+            if total >= required {
+                break;
+            }
+            if points.len() == max_inputs {
+                bail!(
+                    "{object} needs more than {max_inputs} wallet outputs, the most one can spend. \
+                     The largest {max_inputs} hold {} IUNA: use a smaller amount, or let \
+                     continuous Ledger mining consolidate small outputs first",
+                    iuna_label(total)
+                );
             }
             points.push((point.clone(), key.clone()));
-            total = total
-                .checked_add(output.value)
-                .ok_or_else(|| anyhow::anyhow!("balance overflow"))?;
-            if total >= required {
-                return Ok((points, total));
-            }
+            total += value;
         }
-        bail!("insufficient available balance")
+        Ok((points, total))
     }
 
     fn select_consolidating_inputs(
@@ -710,6 +821,167 @@ mod tests {
             wallet.receive_address(0)
         );
         assert_eq!(validate_pending_transaction(&state, &transaction), Ok(1));
+    }
+
+    fn state_with_outputs(wallet: &Wallet, values: &[Amount]) -> ConsensusState {
+        let (_, mut state) = pinned_genesis().unwrap();
+        state.utxos.clear();
+        for (index, value) in values.iter().enumerate() {
+            state.utxos.insert(
+                OutPoint {
+                    transaction_id: [7; 32],
+                    output_index: u32::try_from(index).unwrap(),
+                },
+                Output {
+                    owner: wallet.address(),
+                    value: *value,
+                },
+            );
+        }
+        state
+    }
+
+    #[test]
+    fn size_estimates_match_the_canonical_encoding() {
+        let wallet = Wallet::from_seed(GENESIS_SEED);
+        let state = state_with_outputs(&wallet, &[400, 300, 200]);
+        let exact = wallet
+            .build_transaction(&state, &BTreeSet::new(), [45; 32], 899, 1)
+            .unwrap();
+        assert_eq!(exact.canonical_size(), transaction_size(3, 1));
+        let with_change = wallet
+            .build_transaction(&state, &BTreeSet::new(), [45; 32], 500, 1)
+            .unwrap();
+        assert_eq!(with_change.canonical_size(), transaction_size(2, 2));
+
+        let budget = minimum_test_ticket_budget();
+        let state = state_with_outputs(&wallet, &[budget, budget]);
+        let ticket = wallet
+            .build_ticket(
+                &state,
+                &BTreeSet::new(),
+                TicketParameters {
+                    budget: budget + 1,
+                    duration: 1,
+                    fee: 1,
+                    mining_public_key: [95; 32],
+                    lottery_seed: [96; 32],
+                },
+            )
+            .unwrap();
+        assert!(ticket.change.is_some());
+        assert_eq!(
+            ticket.canonical_size(),
+            TICKET_FIXED_BYTES + 2 * SIGNED_INPUT_BYTES + OUTPUT_BYTES
+        );
+    }
+
+    #[test]
+    fn input_limits_keep_objects_mineable() {
+        for outputs in [1, 2] {
+            let inputs = max_transaction_inputs(outputs);
+            assert!(transaction_size(inputs, outputs) <= MAX_LEDGER_TRANSACTION_BYTES);
+            assert!(transaction_size(inputs + 1, outputs) > MAX_LEDGER_TRANSACTION_BYTES);
+        }
+        let inputs = max_ticket_inputs();
+        let ticket_size = |inputs| TICKET_FIXED_BYTES + inputs * SIGNED_INPUT_BYTES + OUTPUT_BYTES;
+        assert!(ticket_size(inputs) <= MAX_TICKET_BYTES);
+        assert!(ticket_size(inputs + 1) > MAX_TICKET_BYTES);
+        assert!(AUTOMATIC_TICKET_MAX_INPUTS <= inputs);
+    }
+
+    #[test]
+    fn transfers_spend_the_largest_outputs_first() {
+        let wallet = Wallet::from_seed(GENESIS_SEED);
+        let state = state_with_outputs(&wallet, &[5, 100, 7, 60]);
+        let transaction = wallet
+            .build_transaction(&state, &BTreeSet::new(), [45; 32], 120, 1)
+            .unwrap();
+        let spent = transaction
+            .inputs
+            .iter()
+            .map(|input| state.utxos[&input.previous_output].value)
+            .collect::<Vec<_>>();
+        assert_eq!(spent, [100, 60]);
+    }
+
+    #[test]
+    fn transfers_needing_too_many_inputs_explain_the_limit() {
+        let wallet = Wallet::from_seed(GENESIS_SEED);
+        let count = max_transfer_inputs() + 1;
+        let state = state_with_outputs(&wallet, &vec![UNITS_PER_IUNA; count]);
+        let error = wallet
+            .build_transaction(
+                &state,
+                &BTreeSet::new(),
+                [45; 32],
+                UNITS_PER_IUNA * count as u64 - 1,
+                1,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "more than {} wallet outputs",
+                max_transfer_inputs()
+            )),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("hold {} IUNA", count - 1)),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn transfer_limit_counts_the_largest_outputs_one_transaction_holds() {
+        let limit = TransferLimit::from_values(vec![3, 9, 4]);
+        assert_eq!(
+            limit,
+            TransferLimit {
+                inputs: 3,
+                value: 16,
+                minimum_fee: 1,
+            }
+        );
+        let many = max_transfer_inputs() + 10;
+        let mut values = vec![1; many];
+        values[0] = 1_000;
+        let limit = TransferLimit::from_values(values);
+        assert_eq!(limit.inputs, max_transfer_inputs());
+        assert_eq!(limit.value, 1_000 + max_transfer_inputs() as u64 - 1);
+        assert_eq!(
+            limit.minimum_fee,
+            minimum_relay_fee(transaction_size(limit.inputs, 1))
+        );
+        assert_eq!(
+            TransferLimit::from_values(Vec::new()),
+            TransferLimit::default()
+        );
+
+        // "Max" sends the limit minus its fee: every counted input, and no change.
+        let wallet = Wallet::from_seed(GENESIS_SEED);
+        let state = state_with_outputs(&wallet, &[3, 9, 4]);
+        let limit = TransferLimit::from_values(vec![3, 9, 4]);
+        let transaction = wallet
+            .build_transaction(
+                &state,
+                &BTreeSet::new(),
+                [45; 32],
+                limit.value - limit.minimum_fee,
+                limit.minimum_fee,
+            )
+            .unwrap();
+        assert_eq!(transaction.inputs.len(), limit.inputs);
+        assert_eq!(transaction.outputs.len(), 1);
+    }
+
+    #[test]
+    fn amounts_in_messages_read_as_iuna() {
+        assert_eq!(iuna_label(0), "0");
+        assert_eq!(iuna_label(UNITS_PER_IUNA * 12), "12");
+        assert_eq!(iuna_label(150_000_001), "1.50000001");
+        assert_eq!(iuna_label(1_000), "0.00001");
     }
 
     #[test]

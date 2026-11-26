@@ -409,3 +409,74 @@ test('browser wallet reproduces the vector verified by the Rust validator', asyn
   const lied = await core.signingDigest(transaction, 0, [10, 500]);
   assert.notEqual(core.bytesHex(lied), vector.signing_digests[0]);
 });
+
+test('incremental SHA-256 matches WebCrypto and resumes from a copied state', async () => {
+  const webcrypto = async (bytes) => core.bytesHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
+  const bytes = Uint8Array.from({ length: 70_000 }, (_, index) => (index * 31 + 7) & 0xff);
+  for (const length of [0, 1, 55, 56, 63, 64, 65, 119, 120, 128, 1_000, 70_000]) {
+    const slice = bytes.subarray(0, length);
+    assert.equal(core.bytesHex(new core.Sha256().update(slice).digest()), await webcrypto(slice), `length ${length}`);
+  }
+  const prefix = new core.Sha256().update(bytes.subarray(0, 1_001));
+  const tail = bytes.subarray(1_001, 1_005);
+  assert.equal(core.bytesHex(prefix.clone().update(tail).digest()), await webcrypto(bytes.subarray(0, 1_005)));
+  assert.equal(core.bytesHex(prefix.clone().update(tail).digest()), await webcrypto(bytes.subarray(0, 1_005)), 'the copied state is unchanged');
+});
+
+test('transfer sizes and limits match the node wallet', () => {
+  const rust = source('src/app/consensus_node.rs');
+  assert.match(rust, /const LEDGER_TEMPLATE_OVERHEAD_BYTES: usize = 512;/);
+  assert.match(source('src/consensus.rs'), /pub const MAX_LEDGER_SIDECAR_BYTES: usize = 512 \* 1024;/);
+  assert.equal(core.MAX_LEDGER_TRANSACTION_BYTES, 512 * 1024 - 512 - 8);
+  assert.match(rust, /LEDGER_TEMPLATE_OVERHEAD_BYTES - 2 \* std::mem::size_of::<u32>\(\)/);
+  assert.equal(core.transactionSize(2, 2), 362);
+  assert.ok(core.transactionSize(core.MAX_TRANSFER_INPUTS, 2) <= core.MAX_LEDGER_TRANSACTION_BYTES);
+  assert.ok(core.transactionSize(core.MAX_TRANSFER_INPUTS + 1, 2) > core.MAX_LEDGER_TRANSACTION_BYTES);
+  assert.equal(core.minimumRelayFee(1_000), 1);
+  assert.equal(core.minimumRelayFee(1_001), 2);
+});
+
+test('transfers spend the largest outputs and raise a too-low fee to the relay minimum', () => {
+  const utxo = (index, value, reserved = false) => ({ transaction_id: index.toString(16).padStart(64, '0'), output_index: 0, value, reserved });
+  const plan = core.planTransfer({ utxos: [utxo(1, 5), utxo(2, 100), utxo(3, 7), utxo(4, 60, true)], amount: 101, fee: 1 });
+  assert.deepEqual(plan.selected.map((item) => item.value), [100, 7]);
+  assert.equal(plan.raised, false);
+
+  const dust = Array.from({ length: 20 }, (_, index) => utxo(index + 1, 10));
+  const raised = core.planTransfer({ utxos: dust, amount: 150, fee: 1 });
+  // 16 inputs plus change are 2,266 bytes, so the relay minimum is 3 units.
+  assert.equal(raised.selected.length, 16);
+  assert.equal(raised.fee, 3);
+  assert.equal(raised.raised, true);
+
+  const maximum = core.maximumTransfer(dust, 1);
+  assert.deepEqual({ ...maximum }, { amount: 197, fee: 3, inputs: 20, limited: false });
+  const exact = core.planTransfer({ utxos: dust, amount: maximum.amount, fee: maximum.fee });
+  assert.equal(exact.selected.length, 20);
+  assert.equal(exact.raised, false);
+});
+
+test('a transfer needing more inputs than one transaction holds is refused', () => {
+  const count = core.MAX_TRANSFER_INPUTS + 5;
+  const utxos = Array.from({ length: count }, (_, index) => ({ transaction_id: index.toString(16).padStart(64, '0'), output_index: 0, value: 100_000_000, reserved: false }));
+  assert.throws(
+    () => core.planTransfer({ utxos, amount: (count - 1) * 100_000_000, fee: 1_000 }),
+    new RegExp(`more than ${core.MAX_TRANSFER_INPUTS} outputs.*hold ${core.MAX_TRANSFER_INPUTS} IUNA`),
+  );
+  const maximum = core.maximumTransfer(utxos, 1);
+  assert.equal(maximum.inputs, core.MAX_TRANSFER_INPUTS);
+  assert.equal(maximum.limited, true);
+  assert.equal(maximum.fee, core.minimumRelayFee(core.transactionSize(core.MAX_TRANSFER_INPUTS, 1)));
+});
+
+test('signing refuses a fee the node would not relay', async () => {
+  const wallet = await core.walletFromEntropy(new Uint8Array(32));
+  const utxos = Array.from({ length: 20 }, (_, index) => ({ transaction_id: (index + 1).toString(16).padStart(64, '0'), output_index: 0, value: 10, reserved: false }));
+  await assert.rejects(
+    core.buildSignedTransaction({ wallet, utxos, recipient: '22'.repeat(32), amount: 150, fee: 1 }),
+    /below the relay minimum of 0.00000003 IUNA/,
+  );
+  const transaction = await core.buildSignedTransaction({ wallet, utxos, recipient: '22'.repeat(32), amount: 150, fee: 3 });
+  assert.equal(transaction.inputs.length, 16);
+  assert.equal(core.canonicalTransaction(transaction).length, core.transactionSize(16, 2));
+});

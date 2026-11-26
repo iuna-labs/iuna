@@ -42,7 +42,7 @@ use crate::{
     app::{
         consensus_node::{ChainRepository, Node},
         mining_policy::{automatic_ticket_budget, other_active_ticket_weight},
-        wallet_commands::{TicketParameters, WALLET_ADDRESS_SCAN_LIMIT, Wallet},
+        wallet_commands::{TicketParameters, TransferLimit, WALLET_ADDRESS_SCAN_LIMIT, Wallet},
     },
     consensus::{
         Address, Chain, ConsensusError, ConsensusState, GENESIS_MINER, GENESIS_REWARD,
@@ -106,6 +106,9 @@ pub struct OperatorStatus {
     pub wallet_spendable_balance: Option<u64>,
     pub wallet_utxos: Option<usize>,
     pub wallet_spendable_utxos: Option<usize>,
+    /// The most one Ledger transaction can send, which "Max" uses once a wallet holds more
+    /// spendable outputs than one transaction can spend.
+    pub wallet_transfer_limit: Option<TransferLimitView>,
     pub wallet_unlocked: bool,
     pub management_enabled: bool,
     /// Management needs `Authorization: Bearer <operator token>`; otherwise it is open to the
@@ -399,11 +402,52 @@ pub struct PublicWalletQuery {
 }
 
 #[derive(Debug, Serialize)]
+pub struct TransferLimitView {
+    /// How many of the largest spendable outputs one transaction to a single recipient holds.
+    pub inputs: usize,
+    /// Their total value: the most such a transaction can move, fee included.
+    pub value: u64,
+    /// The relay minimum fee for that transaction.
+    pub minimum_fee: u64,
+}
+
+impl From<TransferLimit> for TransferLimitView {
+    fn from(limit: TransferLimit) -> Self {
+        Self {
+            inputs: limit.inputs,
+            value: limit.value,
+            minimum_fee: limit.minimum_fee,
+        }
+    }
+}
+
+/// One page of the node wallet's unspent outputs, largest first, the order transfers spend them.
+#[derive(Debug, Serialize)]
+pub struct WalletUtxosView {
+    pub public_key: String,
+    pub tip_hash: String,
+    pub total: usize,
+    pub utxos: Vec<PublicWalletUtxo>,
+    pub next_offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletUtxosQuery {
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_wallet_utxo_page")]
+    pub limit: usize,
+}
+
+fn default_wallet_utxo_page() -> usize {
+    WALLET_UTXO_PAGE
+}
+
+#[derive(Debug, Serialize)]
 pub struct WalletActivityView {
     pub public_key: String,
     pub tip_hash: String,
     pub scanned_heartbeats: u64,
-    pub utxos: Vec<PublicWalletUtxo>,
     pub pending: Vec<WalletActivityItem>,
     pub confirmed: Vec<WalletActivityItem>,
     pub next_before_height: Option<u64>,
@@ -428,6 +472,9 @@ const MEMPOOL_PREVIEW_ITEMS: usize = 200;
 
 /// Bounds the public response size; such a wallet can still spend by consolidating outputs.
 const MAX_PUBLIC_WALLET_UTXOS: usize = 1_000;
+/// The node wallet's UTXO list loads in pages of this size, and never more than
+/// `MAX_PUBLIC_WALLET_UTXOS` at once.
+const WALLET_UTXO_PAGE: usize = 200;
 /// Fits the stable root address plus one 20-address gap window of both wallet branches.
 const MAX_PUBLIC_WALLET_ADDRESSES: usize = 64;
 /// Activity needs the complete discovered address set so change is part of the balance delta.
@@ -794,6 +841,7 @@ pub fn router(state: ConsensusHttpState) -> Router {
         .route("/api/mempool/{id}", get(mempool_item))
         .route("/api/peers", get(peers))
         .route("/api/wallet/activity", get(wallet_activity))
+        .route("/api/wallet/utxos", get(wallet_utxos))
         .route("/api/peer-targets", get(peer_targets))
         .route("/api/mining-ticket-quote", get(mining_ticket_quote))
         .merge(management)
@@ -1431,21 +1479,7 @@ async fn wallet_activity(
         query.before_height,
     )
     .await?;
-    let mut node = state.node.lock().await;
-    let owned = owners
-        .iter()
-        .flat_map(|owner| node.owned_outputs(owner))
-        .collect::<Vec<_>>();
-    let utxos = owned
-        .iter()
-        .take(MAX_PUBLIC_WALLET_UTXOS)
-        .map(|(point, output)| PublicWalletUtxo {
-            transaction_id: hex(&point.transaction_id),
-            output_index: point.output_index,
-            value: output.value,
-            reserved: node.is_input_reserved(point),
-        })
-        .collect();
+    let node = state.node.lock().await;
     let chain = node.chain();
     let empty_block_outputs = std::collections::BTreeMap::new();
     let mut pending = node
@@ -1483,10 +1517,50 @@ async fn wallet_activity(
         public_key: hex(&public_key),
         tip_hash: hex(&chain.tip().tip),
         scanned_heartbeats: scanned,
-        utxos,
         pending,
         confirmed,
         next_before_height,
+    }))
+}
+
+/// The node wallet's unspent outputs, a page at a time. Separate from the activity, which the UI
+/// polls, because a long-running miner can hold thousands of outputs.
+async fn wallet_utxos(
+    State(state): State<ConsensusHttpState>,
+    Query(query): Query<WalletUtxosQuery>,
+) -> ApiResult<WalletUtxosView> {
+    let wallet = unlocked_wallet(&state)?;
+    let owners = wallet.owned_addresses();
+    let mut node = state.node.lock().await;
+    let mut owned = owners
+        .iter()
+        .flat_map(|owner| node.owned_outputs(owner))
+        .collect::<Vec<_>>();
+    owned.sort_unstable_by(|(left_point, left), (right_point, right)| {
+        right
+            .value
+            .cmp(&left.value)
+            .then_with(|| left_point.cmp(right_point))
+    });
+    let start = query.offset.min(owned.len());
+    let end = start
+        .saturating_add(query.limit.clamp(1, MAX_PUBLIC_WALLET_UTXOS))
+        .min(owned.len());
+    let utxos = owned[start..end]
+        .iter()
+        .map(|(point, output)| PublicWalletUtxo {
+            transaction_id: hex(&point.transaction_id),
+            output_index: point.output_index,
+            value: output.value,
+            reserved: node.is_input_reserved(point),
+        })
+        .collect();
+    Ok(Json(WalletUtxosView {
+        public_key: hex(&wallet.public_key()),
+        tip_hash: hex(&node.chain().tip().tip),
+        total: owned.len(),
+        utxos,
+        next_offset: (end < owned.len()).then_some(end),
     }))
 }
 
@@ -2322,6 +2396,7 @@ async fn status(State(state): State<ConsensusHttpState>) -> Json<OperatorStatus>
     let wallet = state.wallet.read().expect("wallet state lock poisoned");
     let unlocked = wallet.unlocked.as_ref();
     // The owner index is built once per tip; scanning every UTXO on each poll was not.
+    let mut spendable_values = Vec::new();
     let wallet_totals = unlocked.map(|wallet| {
         wallet
             .owned_addresses()
@@ -2331,6 +2406,9 @@ async fn status(State(state): State<ConsensusHttpState>) -> Json<OperatorStatus>
                 (0, 0, 0, 0),
                 |(balance, spendable, outputs, spendable_outputs), (point, output)| {
                     let reserved = reserved_inputs.contains(&point);
+                    if !reserved {
+                        spendable_values.push(output.value);
+                    }
                     (
                         balance + output.value,
                         spendable + if reserved { 0 } else { output.value },
@@ -2340,6 +2418,9 @@ async fn status(State(state): State<ConsensusHttpState>) -> Json<OperatorStatus>
                 },
             )
     });
+    let wallet_transfer_limit = wallet_totals
+        .is_some()
+        .then(|| TransferLimit::from_values(spendable_values).into());
     let ledger_ticket_power = unlocked
         .map(|wallet| local_ledger_ticket_power(node.chain().tip(), Some(wallet.public_key())));
     let wallet_receive_address = unlocked.and_then(|wallet| {
@@ -2366,6 +2447,7 @@ async fn status(State(state): State<ConsensusHttpState>) -> Json<OperatorStatus>
         wallet_spendable_balance: wallet_totals.map(|totals| totals.1),
         wallet_utxos: wallet_totals.map(|totals| totals.2),
         wallet_spendable_utxos: wallet_totals.map(|totals| totals.3),
+        wallet_transfer_limit,
         wallet_unlocked: unlocked.is_some(),
         management_enabled: state.trusted_management || state.operator_token_hash.is_some(),
         management_requires_token: state.operator_token_hash.is_some(),
@@ -4306,8 +4388,29 @@ mod tests {
         assert_eq!(status["wallet_spendable_balance"], 0);
         assert_eq!(status["wallet_utxos"], 1);
         assert_eq!(status["wallet_spendable_utxos"], 0);
+        assert_eq!(status["wallet_transfer_limit"]["inputs"], 0);
+        assert_eq!(status["wallet_transfer_limit"]["value"], 0);
         assert_eq!(status["wallet_public_key"], hex(&wallet.public_key()));
         assert_eq!(status["wallet_exists"], true);
+
+        let response = router(transaction_state.clone())
+            .oneshot(
+                Request::get("/api/wallet/utxos?limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let utxos: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(utxos["public_key"], hex(&wallet.public_key()));
+        assert_eq!(utxos["total"], 1);
+        assert_eq!(utxos["utxos"][0]["value"], GENESIS_REWARD);
+        assert_eq!(utxos["utxos"][0]["reserved"], true);
+        assert_eq!(utxos["next_offset"], serde_json::Value::Null);
 
         // Once locked, the same funded wallet reveals neither its keys, funds nor history.
         transaction_state.wallet.write().unwrap().unlocked = None;
@@ -4328,19 +4431,18 @@ mod tests {
             "wallet_spendable_balance",
             "wallet_utxos",
             "wallet_spendable_utxos",
+            "wallet_transfer_limit",
             "ledger_ticket_power",
         ] {
             assert_eq!(status[field], serde_json::Value::Null, "{field}");
         }
-        let response = router(transaction_state)
-            .oneshot(
-                Request::get("/api/wallet/activity")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::LOCKED);
+        for path in ["/api/wallet/activity", "/api/wallet/utxos"] {
+            let response = router(transaction_state.clone())
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::LOCKED, "{path}");
+        }
 
         let ticket_directory = tempfile::tempdir().unwrap();
         let ticket_state = management_state(&ticket_directory, wallet, TOKEN);
@@ -5122,7 +5224,7 @@ mod tests {
         );
         assert!(confirmed.iter().any(|item| item["kind"] == "ledger_reward"
             && item["amount"] == detail["rewards"]["ledger"]["total"]));
-        assert!(!activity["utxos"].as_array().unwrap().is_empty());
+        assert!(activity.get("utxos").is_none());
     }
 
     fn management_state(
