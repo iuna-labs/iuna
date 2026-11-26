@@ -4,8 +4,8 @@ const NETWORK_ID = "iuna-mainnet-candidate";
 const GENESIS_HASH = hexBytes("00000015ff94624a51c05e7bf53e0b837baf105d9cf28d0af49955f1a8b24fdb");
 const PKCS8_ED25519_PREFIX = hexBytes("302e020100300506032b657004220420");
 const ADDRESS_GAP_LIMIT = 20;
-// Matches the node wallet keyring and bounds discovery if a node falsely reports every address
-// as used.
+// Matches the node wallet keyring. Discovery stops here, also when a node falsely reports every
+// address as used.
 const ADDRESS_SCAN_LIMIT = 1_000;
 // Change stays below this, so the gap scan past the last used change index never reaches the scan
 // limit. Matches the node wallet's WALLET_CHANGE_ADDRESS_LIMIT.
@@ -200,6 +200,8 @@ async function discoverWalletView(endpoint, wallet) {
   let request = [wallet];
   for (;;) {
     for (const state of branches) {
+      // A wallet that used change past the change limit, before there was one, still loads: its
+      // gap window is cut off at the scan limit, where the node wallet stops as well.
       while (state.scanned < state.highestUsed + 1 + ADDRESS_GAP_LIMIT
         && state.scanned < ADDRESS_SCAN_LIMIT && request.length < MAX_ADDRESS_BATCH) {
         request.push(await wallet.keyAt(state.branch, state.scanned));
@@ -220,9 +222,6 @@ async function discoverWalletView(endpoint, wallet) {
     });
     request = [];
   }
-  if (branches.some((state) => state.scanned < state.highestUsed + 1 + ADDRESS_GAP_LIMIT)) {
-    throw new Error("Wallet address scan limit reached");
-  }
   const views = await Promise.all(entries
     .filter(({ summary }) => Number(summary.utxo_count) > 0)
     .map(({ key }) => fetchAddressView(endpoint, key)));
@@ -231,6 +230,7 @@ async function discoverWalletView(endpoint, wallet) {
   const receiveIndex = branches[RECEIVE_BRANCH].highestUsed + 1;
   const receiveKey = await wallet.keyAt(RECEIVE_BRANCH, receiveIndex);
   const activityAddresses = entries.map(({ key }) => key.addressHex);
+  const emptyChange = emptyChangeIndexes(entries);
   const activity = await fetchWalletActivity(endpoint, wallet.publicKeyHex, activityAddresses);
   if (activity.tip_hash !== first.tip_hash) return null;
   return {
@@ -247,27 +247,37 @@ async function discoverWalletView(endpoint, wallet) {
     next_utxo_offset: null,
     receive_address: receiveKey.addressHex,
     receive_index: receiveIndex,
-    change_index: changeIndexFor(branches[CHANGE_BRANCH].highestUsed, entries),
+    change_index: changeIndexFor(branches[CHANGE_BRANCH].highestUsed, emptyChange),
+    empty_change_indexes: emptyChange,
     activity_addresses: activityAddresses,
     activity,
   };
 }
 
-// The next fresh change index or, once every one below the limit was used, the lowest change
-// address holding nothing. Reuse only costs privacy; a fresh index past the limit would make the
-// wallet fail to load.
-function changeIndexFor(highestUsed, entries) {
-  if (highestUsed + 1 < CHANGE_ADDRESS_LIMIT) return highestUsed + 1;
-  const empty = entries
+// The scanned change indexes below the limit that hold nothing, in ascending order.
+function emptyChangeIndexes(entries) {
+  return entries
     .filter(({ key, summary }) => key.branch === CHANGE_BRANCH && key.index < CHANGE_ADDRESS_LIMIT
       && Number(summary.balance) === 0 && Number(summary.utxo_count) === 0)
-    .map(({ key }) => key.index);
-  return empty.length ? Math.min(...empty) : 0;
+    .map(({ key }) => key.index)
+    .sort((a, b) => a - b);
 }
 
-// The change index for a second send before the next refresh.
-export function nextChangeIndex(index) {
-  const next = (index || 0) + 1;
+// The next fresh change index or, once every one below the limit was used, the lowest change
+// address holding nothing. Reuse only costs privacy; a fresh index past the limit would hide
+// change from a restored wallet.
+function changeIndexFor(highestUsed, emptyIndexes) {
+  if (highestUsed + 1 < CHANGE_ADDRESS_LIMIT) return highestUsed + 1;
+  return emptyIndexes.length ? emptyIndexes[0] : 0;
+}
+
+// The change index for a second send before the next refresh: the next scanned index that holds
+// nothing, so a reused address never already holds funds. Past the last one it wraps around.
+export function nextChangeIndex(index, emptyIndexes = []) {
+  const current = index || 0;
+  const candidates = emptyIndexes.filter((candidate) => candidate !== current);
+  if (candidates.length) return candidates.find((candidate) => candidate > current) ?? candidates[0];
+  const next = current + 1;
   return next < CHANGE_ADDRESS_LIMIT ? next : 0;
 }
 

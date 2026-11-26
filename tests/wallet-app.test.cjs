@@ -160,7 +160,7 @@ test('browser wallet discovers addresses in batches and loads outputs only where
   }
 });
 
-test('browser wallet bounds address discovery when a node reports an unending used branch', async () => {
+test('browser wallet stops address discovery at the scan limit when a node reports an unending used branch', async () => {
   const wallet = {
     publicKeyHex: '11'.repeat(32),
     addressHex: '22'.repeat(32),
@@ -169,9 +169,14 @@ test('browser wallet bounds address discovery when a node reports an unending us
     },
   };
   const originalFetch = globalThis.fetch;
+  const scanned = [];
   globalThis.fetch = async (url, options = {}) => {
+    if (String(url).endsWith('/api/public/wallet-activity')) {
+      return new Response(JSON.stringify({ tip_hash: 'ff'.repeat(32), pending: [], confirmed: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
     assert.ok(String(url).endsWith('/api/public/wallet-addresses'));
     const { addresses } = JSON.parse(options.body);
+    scanned.push(...addresses);
     return new Response(JSON.stringify({
       network: 'iuna-mainnet-candidate',
       heartbeat_height: 7,
@@ -185,10 +190,48 @@ test('browser wallet bounds address discovery when a node reports an unending us
     }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   try {
-    await assert.rejects(
-      core.fetchWalletView('https://wallet.getiuna.org', wallet),
-      /Wallet address scan limit reached/,
-    );
+    const view = await core.fetchWalletView('https://wallet.getiuna.org', wallet);
+    // The scan stops at index 1,000 of both branches, as the node wallet's does.
+    assert.equal(scanned.length, 1 + 2 * 1000);
+    assert.equal(view.balance, 0);
+    assert.equal(view.change_index, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('browser wallet loads a wallet that used change past the change limit', async () => {
+  const wallet = {
+    publicKeyHex: '11'.repeat(32),
+    addressHex: '22'.repeat(32),
+    async keyAt(branch, index) {
+      return { branch, index, addressHex: `${branch}${String(index).padStart(63, '0')}` };
+    },
+  };
+  const chain = { network: 'iuna-mainnet-candidate', heartbeat_height: 7, tip_timestamp: 123, tip_hash: 'ff'.repeat(32), ledger_blocks: 1 };
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    if (String(url).endsWith('/api/public/wallet-activity')) {
+      return json({ ...chain, scanned_heartbeats: 7, pending: [], confirmed: [], next_before_height: null });
+    }
+    const { addresses } = JSON.parse(options.body);
+    // An older wallet handed out change up to index 990, past today's limit of 980.
+    return json({
+      ...chain,
+      addresses: addresses.map((address) => ({
+        address,
+        used: address.startsWith('1') && Number.parseInt(address.slice(1), 10) <= 990,
+        balance: 0,
+        spendable_balance: 0,
+        utxo_count: 0,
+      })),
+      pending_transaction_ids: [],
+    });
+  };
+  try {
+    const view = await core.fetchWalletView('https://wallet.getiuna.org', wallet);
+    assert.equal(view.change_index, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -202,7 +245,9 @@ test('browser wallet reuses an empty change address once every change index was 
       return { branch, index, addressHex: `${branch}${String(index).padStart(63, '0')}` };
     },
   };
-  const funded = `1${String(0).padStart(63, '0')}`;
+  const change = (index) => `1${String(index).padStart(63, '0')}`;
+  // Change 0 and 2 still hold an output.
+  const funded = new Set([change(0), change(2)]);
   const chain = { network: 'iuna-mainnet-candidate', heartbeat_height: 7, tip_timestamp: 123, tip_hash: 'ff'.repeat(32), ledger_blocks: 1 };
   const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
   const originalFetch = globalThis.fetch;
@@ -214,20 +259,21 @@ test('browser wallet reuses an empty change address once every change index was 
       const { addresses } = JSON.parse(options.body);
       return json({
         ...chain,
-        // Every change index below the limit was used; only change 0 still holds an output.
+        // Every change index below the limit was used.
         addresses: addresses.map((address) => ({
           address,
           used: address.startsWith('1') && Number.parseInt(address.slice(1), 10) < 980,
-          balance: address === funded ? 5 : 0,
-          spendable_balance: address === funded ? 5 : 0,
-          utxo_count: address === funded ? 1 : 0,
+          balance: funded.has(address) ? 5 : 0,
+          spendable_balance: funded.has(address) ? 5 : 0,
+          utxo_count: funded.has(address) ? 1 : 0,
         })),
         pending_transaction_ids: [],
       });
     }
+    const address = String(url).split('/').pop().split('?')[0];
     return json({
       ...chain,
-      address: funded,
+      address,
       used: true,
       balance: 5,
       spendable_balance: 5,
@@ -240,6 +286,9 @@ test('browser wallet reuses an empty change address once every change index was 
   try {
     const view = await core.fetchWalletView('https://wallet.getiuna.org', wallet);
     assert.equal(view.change_index, 1);
+    // A second send skips change 2, which still holds an output.
+    assert.equal(core.nextChangeIndex(view.change_index, view.empty_change_indexes), 3);
+    assert.equal(core.nextChangeIndex(979, view.empty_change_indexes), 1);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -348,7 +397,7 @@ test('wallet settings name reachable endpoints and previous wallets are explaine
   // A view that loads after the wallet was locked or switched never replaces the current one.
   assert.match(app, /async function refresh[^]*?const owner = wallet;[^]*?fetchWalletView\(apiEndpoint\(\), owner\);\s*if \(wallet !== owner\) return false;\s*mergeLoadedActivity/);
   assert.match(app, /catch \(error\) \{\s*if \(wallet !== owner\) return false;/);
-  assert.match(app, /submitTransaction\(apiEndpoint\(\), transaction\);[^]*?view\.change_index = nextChangeIndex\(view\.change_index\)/);
+  assert.match(app, /submitTransaction\(apiEndpoint\(\), transaction\);[^]*?view\.change_index = nextChangeIndex\(view\.change_index, view\.empty_change_indexes\)/);
 });
 
 test('wallet only reserves fixed navigation space while it is visible', () => {

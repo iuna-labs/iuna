@@ -437,7 +437,7 @@ async function sendPendingTransfer() {
   const transaction = await buildSignedTransaction({ wallet, utxos: view.utxos, changeIndex: view.change_index, recipient, amount, fee });
   const result = await submitTransaction(apiEndpoint(), transaction);
   // A second send before the next refresh must not reuse this change address.
-  if (transaction.outputs.length > 1) view.change_index = nextChangeIndex(view.change_index);
+  if (transaction.outputs.length > 1) view.change_index = nextChangeIndex(view.change_index, view.empty_change_indexes);
   pendingTransfer = null;
   toast(`Transaction submitted: ${result.id.slice(0, 12)}…`);
   await refresh(true);
