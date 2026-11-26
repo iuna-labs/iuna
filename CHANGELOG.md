@@ -5,6 +5,17 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.31] - 2026-11-26
+
+### Fixed
+
+- keep transfers working for wallets with many outputs
+- hand back change indexes of objects that were never mined
+- load browser wallets with change past index 980
+- let wallet activity scrolling retry and load exactly once
+- time unfinished lines from their first byte
+- stop the node without blocking the event loop
+
 ## [0.6.30] - 2026-11-25
 
 ### Added
