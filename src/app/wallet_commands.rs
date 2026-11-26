@@ -686,13 +686,26 @@ impl Wallet {
         result
     }
 
+    /// Moves the cursor to the first change index past the ones the chain or the mempool use.
+    /// An object that left the mempool unmined, evicted or dropped by a reorg, hands its index
+    /// back, so unused indexes never pile up past the recovery gap limit.
     fn sync_change_cursor<R: ChainRepository>(&self, node: &mut Node<R>) {
-        let mut index = self.change_cursor.load(Ordering::Relaxed);
-        while index < WALLET_CHANGE_ADDRESS_LIMIT && node.address_used(&self.change_address(index))
-        {
-            index = index.saturating_add(1);
+        let pending = node.pending_output_owners();
+        let mut taken = |index: u32| {
+            let address = self.change_address(index);
+            pending.contains(&address) || node.address_used(&address)
+        };
+        let mut index = self
+            .change_cursor
+            .load(Ordering::Relaxed)
+            .min(WALLET_CHANGE_ADDRESS_LIMIT);
+        while index > 0 && !taken(index - 1) {
+            index -= 1;
         }
-        self.change_cursor.fetch_max(index, Ordering::Relaxed);
+        while index < WALLET_CHANGE_ADDRESS_LIMIT && taken(index) {
+            index += 1;
+        }
+        self.change_cursor.store(index, Ordering::Relaxed);
     }
 
     fn sign_with_key(&self, key: &SigningKey, message: &[u8]) -> [u8; 64] {
@@ -1191,6 +1204,30 @@ mod tests {
             .find(|transaction| transaction.id() == receipt.id)
             .unwrap();
         assert_eq!(transaction.outputs[1].owner, wallet.change_address(0));
+    }
+
+    #[test]
+    fn change_left_unmined_hands_its_index_back() {
+        let wallet = Wallet::from_seed(GENESIS_SEED);
+        let repository = MemoryRepository::default();
+        let mut node = Node::open(repository.clone()).unwrap();
+        let change_owner = |node: &Node<MemoryRepository>, id: Hash| {
+            node.pending_transaction(&id).unwrap().outputs[1].owner
+        };
+        let first = wallet
+            .submit_transaction(&mut node, [97; 32], 10_000_000, 7)
+            .unwrap();
+        assert_eq!(change_owner(&node, first.id), wallet.change_address(0));
+
+        // A restart drops the mempool, as an eviction would: index 0 was never used on chain.
+        let mut node = Node::open(repository).unwrap();
+        let second = wallet
+            .submit_transaction(&mut node, [97; 32], 10_000_000, 7)
+            .unwrap();
+        assert_eq!(change_owner(&node, second.id), wallet.change_address(0));
+        // While that one is pending, its index stays taken.
+        wallet.sync_change_cursor(&mut node);
+        assert_eq!(wallet.change_cursor.load(Ordering::Relaxed), 1);
     }
 
     #[test]

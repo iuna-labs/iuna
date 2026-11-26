@@ -393,6 +393,22 @@ impl<R: ChainRepository> Node<R> {
         )
     }
 
+    /// The owners of every output that pending transactions and tickets would create.
+    pub fn pending_output_owners(&self) -> HashSet<Address> {
+        let transactions = self
+            .pending_transactions
+            .values()
+            .flat_map(|transaction| transaction.outputs.iter());
+        let tickets = self
+            .pending_tickets
+            .values()
+            .flat_map(|ticket| ticket.change.iter());
+        transactions
+            .chain(tickets)
+            .map(|output| output.owner)
+            .collect()
+    }
+
     pub fn reserved_inputs(&self) -> BTreeSet<OutPoint> {
         self.reserved_inputs.clone()
     }
