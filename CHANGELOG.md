@@ -5,6 +5,21 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.32] - 2026-11-27
+
+### Added
+
+- frame the hero around fairness and preview how it works
+
+### Fixed
+
+- leave out tickets that spend the chosen candidate's inputs
+- size the stored-block JSON limit for the densest valid blocks
+- evict inbound sessions by netgroup and diversify discovered peers
+- cap open connections and close idle ones on both listeners
+- check compact block tickets before buffering them
+- cache verified signatures so a new tip skips mempool re-checks
+
 ## [0.6.31] - 2026-11-26
 
 ### Fixed
