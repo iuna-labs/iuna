@@ -68,6 +68,9 @@ const OUTBOUND_CHANNEL_CAPACITY: usize = 1_024;
 pub const MAX_PEER_TARGETS: usize = 32;
 /// Hello discovery must never consume the operator's configured-peer allowance.
 const MAX_DISCOVERED_PEER_TARGETS: usize = 8;
+/// How many discovered targets one session's Hellos can add, so a single peer cannot choose
+/// every discovered outbound peer.
+const MAX_DISCOVERED_PEERS_PER_SESSION: usize = 2;
 
 pub type SharedConsensusNode = Arc<Mutex<Node<ConsensusChainStore>>>;
 
@@ -170,10 +173,58 @@ impl From<SocketAddr> for PeerAddress {
     }
 }
 
-#[derive(Default)]
+/// Inbound sessions protected from eviction for each reason, in the spirit of Bitcoin Core.
+const PROTECTED_INBOUND_NETGROUPS: usize = 4;
+const PROTECTED_INBOUND_BLOCK_RELAYERS: usize = 4;
+const PROTECTED_INBOUND_RELAYERS: usize = 4;
+
+/// Addresses in one netgroup (IPv4 /16, IPv6 /32) are cheap to obtain together, so they likely
+/// share an operator. Slots are spread across netgroups, not only across hosts.
+fn netgroup(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V4(ip) => {
+            let [first, second, ..] = ip.octets();
+            IpAddr::from([first, second, 0, 0])
+        }
+        IpAddr::V6(ip) => {
+            let mut octets = ip.octets();
+            octets[4..].fill(0);
+            IpAddr::from(octets)
+        }
+    }
+}
+
+/// When every inbound slot is taken, a newcomer evicts a session instead of being refused, so
+/// whoever connects first cannot keep the node closed to everyone else.
 struct InboundLimiter {
-    active: usize,
     hosts: BTreeMap<IpAddr, InboundHost>,
+    sessions: BTreeMap<u64, InboundSession>,
+    next_id: u64,
+    /// Orders netgroups for protection with a secret per-process key, so a peer cannot choose
+    /// addresses whose netgroup is always protected.
+    netgroup_key: std::hash::RandomState,
+}
+
+impl Default for InboundLimiter {
+    fn default() -> Self {
+        Self {
+            hosts: BTreeMap::new(),
+            sessions: BTreeMap::new(),
+            next_id: 0,
+            netgroup_key: std::hash::RandomState::new(),
+        }
+    }
+}
+
+struct InboundSession {
+    host: IpAddr,
+    netgroup: IpAddr,
+    connected_at: Instant,
+    /// When the session last delivered a block that moved this node's tip.
+    last_block: Option<Instant>,
+    /// When the session last delivered a transaction, ticket or candidate new to this node.
+    last_relay: Option<Instant>,
+    evict: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// One limit per host: an IPv6 host holds a whole /64, and IPv4-mapped addresses are plain IPv4.
@@ -197,15 +248,60 @@ struct InboundHost {
 /// Frees its inbound slot when the session ends.
 struct InboundPermit {
     limiter: Arc<StdMutex<InboundLimiter>>,
-    ip: IpAddr,
+    id: u64,
+}
+
+impl InboundPermit {
+    fn activity(&self) -> SessionActivity {
+        SessionActivity {
+            limiter: Arc::clone(&self.limiter),
+            id: self.id,
+        }
+    }
 }
 
 impl Drop for InboundPermit {
     fn drop(&mut self) {
+        self.limiter
+            .lock()
+            .expect("inbound limiter lock poisoned")
+            .release(self.id);
+    }
+}
+
+/// Lets a session record that its peer was useful, which protects it from eviction.
+#[derive(Clone)]
+struct SessionActivity {
+    limiter: Arc<StdMutex<InboundLimiter>>,
+    id: u64,
+}
+
+impl SessionActivity {
+    /// `gossip` is what the peer's last message made this node relay onwards.
+    fn record(&self, gossip: &[Envelope]) {
+        let block = gossip
+            .iter()
+            .any(|envelope| matches!(envelope, Envelope::Inventory { .. }));
+        let relay = gossip.iter().any(|envelope| {
+            matches!(
+                envelope,
+                Envelope::Transactions { .. }
+                    | Envelope::Tickets { .. }
+                    | Envelope::Candidates { .. }
+            )
+        });
+        if !block && !relay {
+            return;
+        }
+        let now = Instant::now();
         let mut limiter = self.limiter.lock().expect("inbound limiter lock poisoned");
-        limiter.active -= 1;
-        if let Some(host) = limiter.hosts.get_mut(&inbound_host(self.ip)) {
-            host.active -= 1;
+        if let Some(session) = limiter.sessions.get_mut(&self.id) {
+            if block {
+                session.last_block = Some(now);
+            }
+            if relay {
+                session.last_relay = Some(now);
+            }
         }
     }
 }
@@ -222,19 +318,50 @@ impl InboundHost {
     }
 }
 
+/// Removes the `count` candidates that rank highest by `key`; those without a key are not
+/// protected for this reason.
+fn protect_by<K: Ord>(
+    candidates: &mut Vec<(u64, &InboundSession)>,
+    count: usize,
+    key: impl Fn(u64, &InboundSession) -> Option<K>,
+) {
+    let mut ranked = candidates
+        .iter()
+        .filter_map(|(id, session)| key(*id, session).map(|key| (key, *id)))
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.cmp(left));
+    let protected = ranked
+        .into_iter()
+        .take(count)
+        .map(|(_, id)| id)
+        .collect::<HashSet<_>>();
+    candidates.retain(|(id, _)| !protected.contains(id));
+}
+
 impl InboundLimiter {
-    fn acquire(limiter: &Arc<StdMutex<Self>>, ip: IpAddr) -> Option<InboundPermit> {
-        let admitted = limiter
+    /// The receiver fires when a later newcomer evicts this session.
+    fn acquire(
+        limiter: &Arc<StdMutex<Self>>,
+        ip: IpAddr,
+    ) -> Option<(InboundPermit, tokio::sync::oneshot::Receiver<()>)> {
+        let (id, evicted) = limiter
             .lock()
             .expect("inbound limiter lock poisoned")
-            .admit(ip, Instant::now());
-        admitted.then(|| InboundPermit {
-            limiter: Arc::clone(limiter),
-            ip,
-        })
+            .admit(ip, Instant::now())?;
+        Some((
+            InboundPermit {
+                limiter: Arc::clone(limiter),
+                id,
+            },
+            evicted,
+        ))
     }
 
-    fn admit(&mut self, ip: IpAddr, now: Instant) -> bool {
+    fn admit(
+        &mut self,
+        ip: IpAddr,
+        now: Instant,
+    ) -> Option<(u64, tokio::sync::oneshot::Receiver<()>)> {
         // Hosts without a session age out, so scanning the internet cannot grow this map.
         if self.hosts.len() >= MAX_INBOUND_TRACKED_HOSTS {
             self.hosts.retain(|_, host| {
@@ -242,20 +369,110 @@ impl InboundLimiter {
                 host.active > 0 || !host.accepted_at.is_empty()
             });
         }
-        if self.active >= MAX_INBOUND_SESSIONS {
-            return false;
-        }
-        let host = self.hosts.entry(inbound_host(ip)).or_default();
+        let host_key = inbound_host(ip);
+        let host = self.hosts.entry(host_key).or_default();
         host.expire_accepts(now);
+        // Checked before eviction, so a refused newcomer never costs another peer its slot.
         if host.active >= MAX_INBOUND_SESSIONS_PER_IP
             || host.accepted_at.len() >= MAX_INBOUND_ACCEPTS_PER_IP_PER_WINDOW
         {
-            return false;
+            return None;
         }
+        if self.sessions.len() >= MAX_INBOUND_SESSIONS {
+            let victim = self.eviction_candidate()?;
+            if let Some(evict) = self.release(victim) {
+                let _ = evict.send(());
+            }
+        }
+        let host = self.hosts.entry(host_key).or_default();
         host.active += 1;
         host.accepted_at.push_back(now);
-        self.active += 1;
-        true
+        let id = self.next_id;
+        self.next_id += 1;
+        let (evict, evicted) = tokio::sync::oneshot::channel();
+        self.sessions.insert(
+            id,
+            InboundSession {
+                host: host_key,
+                netgroup: netgroup(ip),
+                connected_at: now,
+                last_block: None,
+                last_relay: None,
+                evict: Some(evict),
+            },
+        );
+        Some((id, evicted))
+    }
+
+    /// Frees a session's slot. Returns its eviction signal if the session was still counted.
+    fn release(&mut self, id: u64) -> Option<tokio::sync::oneshot::Sender<()>> {
+        let mut session = self.sessions.remove(&id)?;
+        if let Some(host) = self.hosts.get_mut(&session.host) {
+            host.active -= 1;
+        }
+        session.evict.take()
+    }
+
+    /// Like Bitcoin Core: protect some sessions from a few netgroups, those that recently
+    /// delivered blocks or other new objects, and the longest-lived half of the rest. Then evict
+    /// the youngest session of the netgroup holding the most sessions. `None` if all are
+    /// protected.
+    fn eviction_candidate(&self) -> Option<u64> {
+        let mut candidates = self
+            .sessions
+            .iter()
+            .map(|(id, session)| (*id, session))
+            .collect::<Vec<_>>();
+        // The oldest session of a few netgroups picked by secret key: one each, so a single
+        // crowded netgroup gains nothing here.
+        let mut oldest = HashMap::<IpAddr, (Instant, u64)>::new();
+        for (id, session) in &candidates {
+            let entry = oldest
+                .entry(session.netgroup)
+                .or_insert((session.connected_at, *id));
+            *entry = (*entry).min((session.connected_at, *id));
+        }
+        let mut netgroups = oldest.into_iter().collect::<Vec<_>>();
+        netgroups.sort_by_key(|(netgroup, _)| {
+            std::hash::BuildHasher::hash_one(&self.netgroup_key, netgroup)
+        });
+        let protected = netgroups
+            .into_iter()
+            .take(PROTECTED_INBOUND_NETGROUPS)
+            .map(|(_, (_, id))| id)
+            .collect::<HashSet<_>>();
+        candidates.retain(|(id, _)| !protected.contains(id));
+        protect_by(
+            &mut candidates,
+            PROTECTED_INBOUND_BLOCK_RELAYERS,
+            |_, session| session.last_block,
+        );
+        protect_by(&mut candidates, PROTECTED_INBOUND_RELAYERS, |_, session| {
+            session.last_relay
+        });
+        let longest_lived = candidates.len() / 2;
+        protect_by(&mut candidates, longest_lived, |id, session| {
+            Some(std::cmp::Reverse((session.connected_at, id)))
+        });
+
+        let mut netgroups = HashMap::<IpAddr, Vec<(u64, &InboundSession)>>::new();
+        for (id, session) in candidates {
+            netgroups
+                .entry(session.netgroup)
+                .or_default()
+                .push((id, session));
+        }
+        let youngest = |sessions: &[(u64, &InboundSession)]| {
+            sessions
+                .iter()
+                .map(|(id, session)| (session.connected_at, *id))
+                .max()
+        };
+        netgroups
+            .into_values()
+            .max_by_key(|sessions| (sessions.len(), youngest(sessions)))
+            .and_then(|sessions| youngest(&sessions))
+            .map(|(_, id)| id)
     }
 }
 
@@ -502,36 +719,60 @@ impl PeerRegistry {
 
     /// Learns a peer from a Hello. The node's own advertised address is never learned: a peer
     /// that dialled this node passes it back, and a session with itself would hold two slots.
-    fn discover_target(&self, address: PeerAddress, own: Option<&PeerAddress>) {
+    /// At most one discovered target per netgroup, so addresses one operator obtains together
+    /// cannot fill every slot. Returns whether the target was added.
+    fn discover_target(&self, address: PeerAddress, own: Option<&PeerAddress>) -> bool {
         if own == Some(&address)
             || self.is_own_address(&address)
             || self.has_outbound_session_to(&address)
         {
-            return;
+            return false;
         }
         let Ok(commands) = self.command_sender() else {
-            return;
+            return false;
         };
+        let target_netgroup = |address: &PeerAddress| {
+            address
+                .as_str()
+                .parse::<SocketAddr>()
+                .ok()
+                .map(|address| netgroup(address.ip()))
+        };
+        let new_netgroup = target_netgroup(&address);
         let mut targets = self.targets.write().expect("peer registry lock poisoned");
         let discovered = targets
-            .values()
-            .filter(|target| target.source == "discovered")
-            .count();
-        if targets.contains_key(&address) || discovered >= MAX_DISCOVERED_PEER_TARGETS {
-            return;
+            .iter()
+            .filter(|(_, target)| target.source == "discovered")
+            .map(|(address, _)| address)
+            .collect::<Vec<_>>();
+        if targets.contains_key(&address)
+            || discovered.len() >= MAX_DISCOVERED_PEER_TARGETS
+            || discovered
+                .iter()
+                .any(|known| new_netgroup.is_some() && target_netgroup(known) == new_netgroup)
+        {
+            return false;
         }
         targets.insert(address.clone(), new_target(&address, "discovered"));
         drop(targets);
         let _ = commands.send(PeerCommand::Add(address));
+        true
     }
 
-    fn discover_hello_peers(&self, hello: &Hello, own: Option<&PeerAddress>) {
+    /// Learns at most `budget` new targets and deducts what it learned.
+    fn discover_hello_peers(&self, hello: &Hello, own: Option<&PeerAddress>, budget: &mut usize) {
         for address in hello.known_peers.iter().take(MAX_HELLO_PEERS) {
+            if *budget == 0 {
+                return;
+            }
             let Ok(address) = address.parse::<SocketAddr>() else {
                 continue;
             };
-            if address.port() > 0 && ip_is_publicly_discoverable(address.ip()) {
-                self.discover_target(address.into(), own);
+            if address.port() > 0
+                && ip_is_publicly_discoverable(address.ip())
+                && self.discover_target(address.into(), own)
+            {
+                *budget -= 1;
             }
         }
     }
@@ -1038,25 +1279,31 @@ async fn run_supervisor(
                         continue;
                     }
                 };
-                let Some(permit) = InboundLimiter::acquire(&inbound_limit, peer_addr.ip()) else {
+                let Some((permit, evicted)) =
+                    InboundLimiter::acquire(&inbound_limit, peer_addr.ip())
+                else {
                     continue;
                 };
                 let receiver = context.outbound.subscribe();
                 let session_shutdown = shutdown.clone();
                 let session_context = context.clone();
                 tokio::spawn(async move {
+                    let activity = permit.activity();
                     let _permit = permit;
                     let key = format!("inbound:{peer_addr}");
                     session_context.peers.connect(key.clone(), peer_addr, "inbound");
-                    let _ = run_connection(
-                        stream,
-                        receiver,
-                        session_shutdown,
-                        session_context.clone(),
-                        key.clone(),
-                        Some(peer_addr),
-                    )
-                    .await;
+                    tokio::select! {
+                        _ = run_connection(
+                            stream,
+                            receiver,
+                            session_shutdown,
+                            session_context.clone(),
+                            key.clone(),
+                            Some((peer_addr, activity)),
+                        ) => {}
+                        // Dropping the connection future closes the socket.
+                        _ = evicted => {}
+                    }
                     session_context.peers.disconnect(&key);
                 });
             }
@@ -1165,8 +1412,9 @@ async fn run_connection(
     mut shutdown: watch::Receiver<bool>,
     context: NetworkContext,
     peer_key: String,
-    discover_from: Option<SocketAddr>,
+    inbound: Option<(SocketAddr, SessionActivity)>,
 ) -> Result<()> {
+    let (discover_from, activity) = inbound.unzip();
     let NetworkContext {
         node,
         outbound: relay_outbound,
@@ -1199,6 +1447,8 @@ async fn run_connection(
     // When the unfinished line in `partial_line` started. The read branch returns as soon as a
     // line starts, so its timer runs from the first byte.
     let mut line_started: Option<Instant> = None;
+    // Hello is resent at will, so one session can teach this node only a few targets in total.
+    let mut discovery_budget = MAX_DISCOVERED_PEERS_PER_SESSION;
     let mut peer_advertisement = tokio::time::interval_at(
         Instant::now() + PEER_ADVERTISEMENT_INTERVAL,
         PEER_ADVERTISEMENT_INTERVAL,
@@ -1264,7 +1514,7 @@ async fn run_connection(
                                 bail!("connected to this node itself");
                             }
                             peers.verify_outbound(&peer_key);
-                            peers.discover_hello_peers(hello, own.as_ref());
+                            peers.discover_hello_peers(hello, own.as_ref(), &mut discovery_budget);
                         }
                         if hello.validate().is_ok()
                             && let (Some(remote), Some(advertised)) = (discover_from, &hello.listen_addr)
@@ -1322,6 +1572,9 @@ async fn run_connection(
                         &peer_key,
                     )
                     .await;
+                    if let Some(activity) = &activity {
+                        activity.record(&gossip);
+                    }
                     // Blocks activated before a bad one are announced even though the session
                     // then ends, so peers do not wait for the next Hello to learn the new tip.
                     for envelope in gossip {
@@ -1396,6 +1649,9 @@ async fn run_connection(
                     }
                     (responses, gossip)
                 };
+                if let Some(activity) = &activity {
+                    activity.record(&gossip);
+                }
                 for response in responses {
                     write_envelope(&mut writer, &response).await?;
                 }
@@ -1634,12 +1890,11 @@ mod tests {
         let ip = IpAddr::from([203, 0, 113, 3]);
         let start = Instant::now();
         for _ in 0..MAX_INBOUND_ACCEPTS_PER_IP_PER_WINDOW {
-            assert!(limiter.admit(ip, start));
-            limiter.active -= 1;
-            limiter.hosts.get_mut(&ip).unwrap().active -= 1;
+            let (id, _) = limiter.admit(ip, start).unwrap();
+            limiter.release(id);
         }
-        assert!(!limiter.admit(ip, start));
-        assert!(limiter.admit(ip, start + INBOUND_ACCEPT_WINDOW));
+        assert!(limiter.admit(ip, start).is_none());
+        assert!(limiter.admit(ip, start + INBOUND_ACCEPT_WINDOW).is_some());
     }
 
     #[test]
@@ -1647,15 +1902,133 @@ mod tests {
         let mut limiter = InboundLimiter::default();
         let start = Instant::now();
         for index in 0..MAX_INBOUND_TRACKED_HOSTS as u32 {
-            assert!(limiter.admit(IpAddr::from(index.to_be_bytes()), start));
-            limiter.active -= 1;
+            let (id, _) = limiter
+                .admit(IpAddr::from(index.to_be_bytes()), start)
+                .unwrap();
+            limiter.release(id);
         }
-        limiter.hosts.values_mut().for_each(|host| host.active -= 1);
-        assert!(limiter.admit(
-            IpAddr::from([203, 0, 113, 5]),
-            start + INBOUND_ACCEPT_WINDOW
-        ));
+        assert!(
+            limiter
+                .admit(
+                    IpAddr::from([203, 0, 113, 5]),
+                    start + INBOUND_ACCEPT_WINDOW
+                )
+                .is_some()
+        );
         assert_eq!(limiter.hosts.len(), 1);
+    }
+
+    /// 16 hosts in one /16 fill every slot, as the audit showed one operator can.
+    fn crowded_limiter(
+        start: Instant,
+    ) -> (
+        InboundLimiter,
+        Vec<(u64, tokio::sync::oneshot::Receiver<()>)>,
+    ) {
+        let mut limiter = InboundLimiter::default();
+        let mut sessions = Vec::new();
+        for index in 0..MAX_INBOUND_SESSIONS {
+            let host = (index / MAX_INBOUND_SESSIONS_PER_IP) as u8;
+            let at = start + Duration::from_secs(index as u64);
+            sessions.push(limiter.admit(IpAddr::from([198, 51, host, 1]), at).unwrap());
+        }
+        (limiter, sessions)
+    }
+
+    #[test]
+    fn a_full_inbound_table_evicts_from_the_most_crowded_netgroup() {
+        let start = Instant::now();
+        let (mut limiter, mut sessions) = crowded_limiter(start);
+        let later = start + Duration::from_secs(1_000);
+
+        let newcomer = limiter.admit(IpAddr::from([203, 0, 113, 7]), later);
+
+        assert!(newcomer.is_some(), "a host from another netgroup gets in");
+        assert_eq!(limiter.sessions.len(), MAX_INBOUND_SESSIONS);
+        let evicted = sessions
+            .iter_mut()
+            .filter_map(|(_, evicted)| evicted.try_recv().ok())
+            .count();
+        assert_eq!(evicted, 1);
+        // The youngest session went, not one of the long-lived ones.
+        let (youngest, _) = sessions.last().unwrap();
+        assert!(!limiter.sessions.contains_key(youngest));
+    }
+
+    #[test]
+    fn a_crowded_netgroup_churning_never_evicts_a_lone_peer() {
+        let start = Instant::now();
+        let mut limiter = InboundLimiter::default();
+        let (honest, mut honest_evicted) = limiter
+            .admit(
+                IpAddr::from([203, 0, 113, 7]),
+                start + Duration::from_secs(500),
+            )
+            .unwrap();
+        for index in 0..MAX_INBOUND_SESSIONS - 1 {
+            let host = (index / MAX_INBOUND_SESSIONS_PER_IP) as u8;
+            let at = start + Duration::from_secs(1_000 + index as u64);
+            limiter.admit(IpAddr::from([198, 51, host, 1]), at).unwrap();
+        }
+        // The crowded group keeps reconnecting from fresh hosts.
+        for round in 0..64u8 {
+            let at = start + Duration::from_secs(2_000 + u64::from(round));
+            let (id, _) = limiter
+                .admit(IpAddr::from([198, 51, 100 + round, 1]), at)
+                .unwrap();
+            assert_ne!(id, honest);
+        }
+        assert!(limiter.sessions.contains_key(&honest));
+        assert!(honest_evicted.try_recv().is_err());
+    }
+
+    #[test]
+    fn peers_that_delivered_blocks_are_protected_from_eviction() {
+        let start = Instant::now();
+        let (mut limiter, _sessions) = crowded_limiter(start);
+        let youngest = *limiter.sessions.keys().max().unwrap();
+        limiter.sessions.get_mut(&youngest).unwrap().last_block = Some(start);
+
+        limiter
+            .admit(
+                IpAddr::from([203, 0, 113, 7]),
+                start + Duration::from_secs(1_000),
+            )
+            .unwrap();
+
+        assert!(limiter.sessions.contains_key(&youngest));
+    }
+
+    #[test]
+    fn a_refused_newcomer_evicts_nobody() {
+        let start = Instant::now();
+        let (mut limiter, mut sessions) = crowded_limiter(start);
+
+        // Host 198.51.0.1 already holds its per-host maximum.
+        assert!(
+            limiter
+                .admit(
+                    IpAddr::from([198, 51, 0, 1]),
+                    start + Duration::from_secs(1_000)
+                )
+                .is_none()
+        );
+        assert!(
+            sessions
+                .iter_mut()
+                .all(|(_, evicted)| evicted.try_recv().is_err())
+        );
+        assert_eq!(limiter.sessions.len(), MAX_INBOUND_SESSIONS);
+    }
+
+    #[test]
+    fn netgroups_are_ipv4_slash_16_and_ipv6_slash_32() {
+        let group = |ip: &str| netgroup(ip.parse().unwrap());
+        assert_eq!(group("198.51.7.1"), group("198.51.200.9"));
+        assert_ne!(group("198.51.7.1"), group("198.52.7.1"));
+        assert_eq!(group("::ffff:198.51.7.1"), group("198.51.0.0"));
+        assert_eq!(group("2001:db8:1::1"), group("2001:db8:ffff::2"));
+        assert_ne!(group("2001:db8::1"), group("2001:db9::1"));
     }
 
     #[test]
@@ -1795,13 +2168,15 @@ mod tests {
             matches!(received.try_recv(), Ok(PeerCommand::Remove(removed)) if removed == address.into())
         );
 
-        for port in 0..MAX_DISCOVERED_PEER_TARGETS as u16 {
-            registry.discover_target(
-                SocketAddr::from(([198, 51, 100, 8], 30_000 + port)).into(),
+        for netgroup in 0..MAX_DISCOVERED_PEER_TARGETS as u8 {
+            assert!(registry.discover_target(
+                SocketAddr::from(([87, netgroup, 100, 8], 30_000)).into(),
                 None,
-            );
+            ));
         }
-        registry.discover_target(SocketAddr::from(([198, 51, 100, 8], 40_000)).into(), None);
+        assert!(
+            !registry.discover_target(SocketAddr::from(([88, 0, 100, 8], 40_000)).into(), None)
+        );
         assert_eq!(
             registry
                 .targets()
@@ -1854,7 +2229,7 @@ mod tests {
             "peer.example:9444".to_owned(),
         ]);
 
-        registry.discover_hello_peers(&hello, None);
+        registry.discover_hello_peers(&hello, None, &mut 8);
 
         assert!(matches!(
             received.try_recv(),
@@ -1863,6 +2238,46 @@ mod tests {
         assert!(received.try_recv().is_err());
         assert_eq!(registry.targets().len(), 1);
         assert_eq!(registry.targets()[0].source, "discovered");
+    }
+
+    #[test]
+    fn one_session_can_teach_only_a_few_targets() {
+        let registry = PeerRegistry::default();
+        let (commands, _received) = mpsc::unbounded_channel();
+        *registry.commands.write().unwrap() = Some(commands);
+        let addresses = (0..MAX_HELLO_PEERS as u8)
+            .map(|netgroup| format!("87.{netgroup}.1.1:9444"))
+            .collect::<Vec<_>>();
+        let hello = Hello::new(0, crate::consensus::GENESIS_HASH).with_known_peers(addresses);
+        let mut budget = MAX_DISCOVERED_PEERS_PER_SESSION;
+
+        registry.discover_hello_peers(&hello, None, &mut budget);
+        // Resending Hello is allowed at any time but teaches nothing more.
+        registry.discover_hello_peers(&hello, None, &mut budget);
+
+        assert_eq!(registry.targets().len(), MAX_DISCOVERED_PEERS_PER_SESSION);
+        // Another session still adds to what is left.
+        registry.discover_hello_peers(&hello, None, &mut MAX_DISCOVERED_PEERS_PER_SESSION.clone());
+        assert_eq!(
+            registry.targets().len(),
+            2 * MAX_DISCOVERED_PEERS_PER_SESSION
+        );
+    }
+
+    #[test]
+    fn one_netgroup_gets_one_discovered_target() {
+        let registry = PeerRegistry::default();
+        let (commands, _received) = mpsc::unbounded_channel();
+        *registry.commands.write().unwrap() = Some(commands);
+        let hello = Hello::new(0, crate::consensus::GENESIS_HASH).with_known_peers(
+            (0..MAX_HELLO_PEERS)
+                .map(|port| format!("87.215.{port}.1:{}", 9_444 + port))
+                .collect(),
+        );
+
+        registry.discover_hello_peers(&hello, None, &mut 8);
+
+        assert_eq!(registry.targets().len(), 1);
     }
 
     #[test]
@@ -1922,7 +2337,7 @@ mod tests {
 
         // The session that dialled `public` received this node's own nonce.
         registry.mark_own_session(&format!("outbound:{public}"));
-        registry.discover_hello_peers(&hello, Some(&default));
+        registry.discover_hello_peers(&hello, Some(&default), &mut 8);
 
         assert_eq!(
             registry
@@ -1988,7 +2403,7 @@ mod tests {
         let hello = Hello::new(0, crate::consensus::GENESIS_HASH)
             .with_known_peers(vec![own.to_string(), "87.215.225.116:9444".to_owned()]);
 
-        registry.discover_hello_peers(&hello, Some(&own));
+        registry.discover_hello_peers(&hello, Some(&own), &mut 8);
 
         assert_eq!(
             registry

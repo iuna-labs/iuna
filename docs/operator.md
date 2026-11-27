@@ -316,7 +316,8 @@ peers.
 
 Hello messages also carry at most `8` outbound peers that answered with a valid Hello. A node
 accepts only public `IP:port` entries from that list, skips its own advertised address and dials
-them as temporary discovered targets. Each Hello also carries a fresh random nonce per session: a
+them as temporary discovered targets: at most `8` in total, at most one per netgroup (IPv4 `/16`,
+IPv6 `/32`), and at most `2` learned from any one session however often it resends Hello. Each Hello also carries a fresh random nonce per session: a
 node that receives the nonce of one of its own open sessions has dialled itself, closes that
 session and does not dial or learn that address again, even when it advertises `0.0.0.0`, until
 the operator adds or removes it as a peer. A discovered `IP:port` that an outbound session already
@@ -325,6 +326,13 @@ with it fails, which frees its slot for a peer another Hello names. The list is 
 minute and discovered peers pass on their own reachable peers in turn, so the network can converge
 beyond its initial bootstrap connections. Discovered targets do not consume the operator's
 configured-peer allowance and are not written to `peers.json`.
+
+A node accepts at most `128` inbound sessions, and at most `8` from one host (an IPv4 address or
+an IPv6 `/64`). When every slot is taken, a newcomer evicts the youngest session of the netgroup
+that holds the most sessions, so peers that connected first cannot keep the node closed to
+everyone else. Protected from eviction are the oldest session of a few netgroups, sessions that
+recently delivered a new block, transaction, ticket or candidate, and the longest-lived half of
+the rest.
 
 Accepted Heartbeats are re-advertised to other peers by inventory, while newly
 accepted Ledger transactions and mining tickets are re-gossiped once. This lets
