@@ -8,8 +8,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::consensus::{
-    CandidateHeader, GENESIS_HASH, Hash, HeartbeatBlock, HeartbeatHeader, NETWORK_ID,
-    PROTOCOL_VERSION, Sidecar, TicketTransaction, Transaction, tagged_hash,
+    CandidateHeader, GENESIS_HASH, Hash, HeartbeatBlock, HeartbeatHeader,
+    MAX_HEARTBEAT_BLOCK_BYTES, NETWORK_ID, PROTOCOL_VERSION, Sidecar, TicketTransaction,
+    Transaction, merkle_root, tagged_hash,
 };
 
 pub const MAX_WIRE_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -128,6 +129,27 @@ impl CompactBlock {
         }
         if self.sidecar_header.is_none() && !self.transaction_short_ids.is_empty() {
             bail!("compact block without a sidecar contains transaction IDs");
+        }
+        // The header's work does not cover the tickets, so a peer could pad them up to the line
+        // limit and have the node keep that while it waits for missing transactions. Check them
+        // against the block size and the header's commitment before anything is kept.
+        if self.header.network != NETWORK_ID {
+            bail!("compact block belongs to another network");
+        }
+        let ticket_bytes = self.tickets.iter().try_fold(0usize, |total, ticket| {
+            let total = total + std::mem::size_of::<u32>() + ticket.canonical_size();
+            (total <= MAX_HEARTBEAT_BLOCK_BYTES).then_some(total)
+        });
+        if ticket_bytes.is_none() {
+            bail!("compact block tickets exceed the Heartbeat block size");
+        }
+        let ticket_ids = self
+            .tickets
+            .iter()
+            .map(TicketTransaction::id)
+            .collect::<Vec<_>>();
+        if self.header.tickets_root != merkle_root(&ticket_ids) {
+            bail!("compact block tickets do not match the header's ticket root");
         }
         Ok(())
     }
@@ -302,6 +324,56 @@ mod tests {
         assert!(compact.sidecar_header.is_none());
         assert!(compact.transaction_short_ids.is_empty());
         assert!(compact.validate_shape().is_ok());
+    }
+
+    #[test]
+    fn compact_block_tickets_must_fit_a_block_and_match_the_header() {
+        let chain = Chain::from_genesis().unwrap();
+        let (block, _) = mine_child(
+            chain.tip(),
+            GENESIS_TIMESTAMP + HEARTBEAT_TARGET_INTERVAL_SECS,
+            [41; 32],
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let ticket = TicketTransaction {
+            version: PROTOCOL_VERSION,
+            inputs: vec![crate::consensus::TicketInput {
+                previous_output: crate::consensus::OutPoint {
+                    transaction_id: [1; 32],
+                    output_index: 0,
+                },
+                public_key: [2; 32],
+                signature: vec![3; 64],
+            }],
+            budget: 1,
+            duration: 1,
+            mining_public_key: [4; 32],
+            lottery_seed: [5; 32],
+            change: None,
+        };
+
+        let mut uncommitted = CompactBlock::from_block(&block);
+        uncommitted.tickets.push(ticket.clone());
+        assert!(uncommitted.validate_shape().is_err());
+
+        // Padding past the block size is refused even if the header committed to it.
+        let mut padded = CompactBlock::from_block(&block);
+        padded.tickets = vec![ticket; MAX_HEARTBEAT_BLOCK_BYTES / 100];
+        padded.header.tickets_root = merkle_root(
+            &padded
+                .tickets
+                .iter()
+                .map(TicketTransaction::id)
+                .collect::<Vec<_>>(),
+        );
+        let error = padded.validate_shape().unwrap_err();
+        assert!(error.to_string().contains("exceed"), "{error:#}");
+
+        let mut foreign = CompactBlock::from_block(&block);
+        foreign.header.network = "x".repeat(1_000_000);
+        assert!(foreign.validate_shape().is_err());
     }
 
     #[test]
