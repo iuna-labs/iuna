@@ -765,7 +765,15 @@ impl<R: ChainRepository> Node<R> {
                 .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
                 .map(|(_, _, candidate)| candidate.clone()),
         };
-        let tickets = self.select_tickets();
+        // Consensus applies the sidecar before the tickets, so a ticket spending an output the
+        // sidecar already spends would make the whole template invalid. It stays pending instead.
+        let sidecar_spent = sidecar
+            .iter()
+            .flat_map(|sidecar| sidecar.transactions.iter())
+            .flat_map(|transaction| transaction.inputs.iter())
+            .map(|input| &input.previous_output)
+            .collect::<BTreeSet<_>>();
+        let tickets = self.select_tickets(&sidecar_spent);
         Ok(PreparedHeartbeat {
             parent: self.chain.tip().clone(),
             tickets,
@@ -851,10 +859,16 @@ impl<R: ChainRepository> Node<R> {
         )
     }
 
-    fn select_tickets(&self) -> Vec<TicketTransaction> {
+    fn select_tickets(&self, excluded_inputs: &BTreeSet<&OutPoint>) -> Vec<TicketTransaction> {
         let mut candidates = self
             .pending_tickets
             .iter()
+            .filter(|(_, ticket)| {
+                ticket
+                    .inputs
+                    .iter()
+                    .all(|input| !excluded_inputs.contains(&input.previous_output))
+            })
             .filter_map(|(id, ticket)| {
                 validate_pending_ticket(self.chain.tip(), ticket)
                     .ok()
@@ -1734,5 +1748,161 @@ mod tests {
             |candidate| candidate.len() <= 1,
         ));
         assert_eq!(selected, vec![high_id]);
+    }
+
+    /// A signed candidate and a pending ticket that spend the same output are each valid against
+    /// the tip, but not together. The template must leave the ticket out so mining continues.
+    fn mine_past_a_ticket_conflicting_with_the_candidate(ticket_first: bool) {
+        use crate::consensus::subsidy;
+
+        let mut node = Node::open(MemoryRepository::default()).unwrap();
+        let genesis_key = SigningKey::from_bytes(&GENESIS_SECRET);
+        let genesis_address = address_from_public_key(&GENESIS_MINER);
+        let candidate_key = SigningKey::from_bytes(&[27; 32]);
+        let genesis_point = node.chain().tip().utxos.keys().next().unwrap().clone();
+
+        let duration = 200;
+        let budget = minimum_ticket_budget(duration, INITIAL_LEDGER_SUBSIDY).unwrap();
+        let mut lottery_ticket = TicketTransaction {
+            version: PROTOCOL_VERSION,
+            inputs: vec![TicketInput {
+                previous_output: genesis_point,
+                public_key: GENESIS_MINER,
+                signature: Vec::new(),
+            }],
+            budget,
+            duration,
+            mining_public_key: candidate_key.verifying_key().to_bytes(),
+            lottery_seed: [43; 32],
+            change: Some(Output {
+                owner: genesis_address,
+                value: GENESIS_REWARD - budget - 1_000,
+            }),
+        };
+        lottery_ticket.inputs[0].signature = genesis_key
+            .sign(&lottery_ticket.signing_digest(0, &[GENESIS_REWARD]).unwrap())
+            .to_bytes()
+            .to_vec();
+        let lottery_ticket_id = lottery_ticket.id();
+        node.submit_ticket(lottery_ticket).unwrap();
+
+        let mut timestamp = GENESIS_TIMESTAMP;
+        let winner = loop {
+            timestamp += HEARTBEAT_TARGET_INTERVAL_SECS;
+            node.mine_next(timestamp, GENESIS_MINER).unwrap();
+            let tip = node.chain().tip();
+            assert!(tip.height < 190, "no pre-deadline win found");
+            let winners = inclusion_winners(tip, tip.height + 1).unwrap();
+            if winners.required.is_none()
+                && let Some(winner) = winners
+                    .available
+                    .into_iter()
+                    .find(|winner| winner.ticket_id == lottery_ticket_id)
+            {
+                break winner;
+            }
+        };
+        let tip = node.chain().tip().clone();
+        let (spent, spent_output) = tip
+            .utxos
+            .iter()
+            .filter(|(_, output)| output.owner == genesis_address)
+            .max_by_key(|(_, output)| output.value)
+            .map(|(point, output)| (point.clone(), output.clone()))
+            .unwrap();
+
+        let mut transaction = Transaction {
+            version: PROTOCOL_VERSION,
+            inputs: vec![Input {
+                previous_output: spent.clone(),
+                public_key: GENESIS_MINER,
+                signature: Vec::new(),
+            }],
+            outputs: vec![Output {
+                owner: [41; 32],
+                value: spent_output.value - 5_000,
+            }],
+        };
+        transaction.inputs[0].signature = genesis_key
+            .sign(
+                &transaction
+                    .signing_digest(0, &[spent_output.value])
+                    .unwrap(),
+            )
+            .to_bytes()
+            .to_vec();
+        let mut candidate = Sidecar {
+            header: CandidateHeader {
+                version: PROTOCOL_VERSION,
+                lottery_heartbeat: winner.heartbeat,
+                lottery_height: winner.heartbeat_height,
+                parent_anchor: winner.parent_anchor,
+                ticket_id: winner.ticket_id,
+                slot: winner.slot,
+                lottery_output: winner.output,
+                transactions_root: merkle_root(&[transaction.id()]),
+                signature: Vec::new(),
+            },
+            transactions: vec![transaction],
+        };
+        candidate.header.signature = candidate_key
+            .sign(&candidate.header.signing_digest())
+            .to_bytes()
+            .to_vec();
+
+        let ticket_budget =
+            minimum_ticket_budget(1, subsidy(tip.ledger_blocks, tip.minted).unwrap()).unwrap();
+        let mut conflicting_ticket = TicketTransaction {
+            version: PROTOCOL_VERSION,
+            inputs: vec![TicketInput {
+                previous_output: spent,
+                public_key: GENESIS_MINER,
+                signature: Vec::new(),
+            }],
+            budget: ticket_budget,
+            duration: 1,
+            mining_public_key: [42; 32],
+            lottery_seed: [44; 32],
+            change: Some(Output {
+                owner: genesis_address,
+                value: spent_output.value - ticket_budget - 1_000,
+            }),
+        };
+        conflicting_ticket.inputs[0].signature = genesis_key
+            .sign(
+                &conflicting_ticket
+                    .signing_digest(0, &[spent_output.value])
+                    .unwrap(),
+            )
+            .to_bytes()
+            .to_vec();
+
+        if ticket_first {
+            node.submit_ticket(conflicting_ticket).unwrap();
+            assert!(node.submit_candidate(candidate).unwrap());
+        } else {
+            assert!(node.submit_candidate(candidate).unwrap());
+            node.submit_ticket(conflicting_ticket).unwrap();
+        }
+
+        timestamp += HEARTBEAT_TARGET_INTERVAL_SECS;
+        let block = node.mine_next(timestamp, GENESIS_MINER).unwrap();
+        assert!(
+            block
+                .sidecar
+                .is_some_and(|sidecar| sidecar.transactions.len() == 1)
+        );
+        assert!(block.tickets.is_empty());
+        assert_eq!(node.chain().tip().height, tip.height + 1);
+    }
+
+    #[test]
+    fn template_skips_a_ticket_that_spends_a_candidate_input_submitted_before_it() {
+        mine_past_a_ticket_conflicting_with_the_candidate(false);
+    }
+
+    #[test]
+    fn template_skips_a_ticket_that_spends_a_candidate_input_submitted_after_it() {
+        mine_past_a_ticket_conflicting_with_the_candidate(true);
     }
 }
