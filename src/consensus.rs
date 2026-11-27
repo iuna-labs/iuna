@@ -2514,13 +2514,65 @@ fn validate_transaction_shape(transaction: &Transaction) -> Result<()> {
     Ok(())
 }
 
+/// Signatures already verified, as hashes of key, message and signature. Verification is a pure
+/// function of those three, so a hit is as good as checking again. Every tip change re-validates
+/// the whole mempool; without this it re-verified every input's signature under the node lock.
+/// Two generations bound the memory: when the newer one fills, the older one is dropped.
+struct SignatureCache {
+    current: std::collections::HashSet<Hash>,
+    previous: std::collections::HashSet<Hash>,
+}
+
+const SIGNATURE_CACHE_GENERATION: usize = 1 << 18;
+
+static SIGNATURE_CACHE: std::sync::Mutex<Option<SignatureCache>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+thread_local! {
+    /// Signatures this thread actually verified, so tests can see what the cache saves.
+    static SIGNATURE_VERIFICATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn signature_verifications() -> u64 {
+    SIGNATURE_VERIFICATIONS.with(std::cell::Cell::get)
+}
+
 fn verify_signature(public_key: &PublicKey, message: &[u8], signature: &[u8]) -> Result<()> {
+    let mut entry = Vec::with_capacity(public_key.len() + 8 + message.len() + signature.len());
+    entry.extend_from_slice(public_key);
+    put_bytes(&mut entry, message);
+    entry.extend_from_slice(signature);
+    let entry = tagged_hash(b"IUNA-SIGNATURE-CACHE-v1", &entry);
+    // A poisoned lock only costs the cache, never a verification.
+    if SIGNATURE_CACHE.lock().is_ok_and(|cache| {
+        cache
+            .as_ref()
+            .is_some_and(|cache| cache.current.contains(&entry) || cache.previous.contains(&entry))
+    }) {
+        return Ok(());
+    }
+
     let key = VerifyingKey::from_bytes(public_key)
         .map_err(|_| ConsensusError::Invalid("invalid Ed25519 public key"))?;
     let signature = Signature::from_slice(signature)
         .map_err(|_| ConsensusError::Invalid("invalid Ed25519 signature length"))?;
+    #[cfg(test)]
+    SIGNATURE_VERIFICATIONS.with(|count| count.set(count.get() + 1));
     key.verify(message, &signature)
-        .map_err(|_| ConsensusError::Invalid("invalid Ed25519 signature"))
+        .map_err(|_| ConsensusError::Invalid("invalid Ed25519 signature"))?;
+
+    if let Ok(mut cache) = SIGNATURE_CACHE.lock() {
+        let cache = cache.get_or_insert_with(|| SignatureCache {
+            current: std::collections::HashSet::new(),
+            previous: std::collections::HashSet::new(),
+        });
+        if cache.current.len() >= SIGNATURE_CACHE_GENERATION {
+            cache.previous = std::mem::take(&mut cache.current);
+        }
+        cache.current.insert(entry);
+    }
+    Ok(())
 }
 
 pub fn merkle_root(leaves: &[Hash]) -> Hash {

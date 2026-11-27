@@ -1353,6 +1353,27 @@ mod tests {
     }
 
     #[test]
+    fn a_new_tip_does_not_verify_pending_signatures_again() {
+        let mut node = Node::open(MemoryRepository::default()).unwrap();
+        let transaction = signed_genesis_transaction(&node);
+        let mut tampered = transaction.clone();
+        node.submit_transaction(transaction).unwrap();
+
+        let before = crate::consensus::signature_verifications();
+        node.mine_next(GENESIS_TIMESTAMP + HEARTBEAT_TARGET_INTERVAL_SECS, [44; 32])
+            .unwrap();
+
+        assert_eq!(node.pending_transaction_count(), 1);
+        assert_eq!(crate::consensus::signature_verifications(), before);
+
+        // The cache holds only what verified: another signature on the same message is checked.
+        tampered.inputs[0].signature[0] ^= 1;
+        let mut fresh = Node::open(MemoryRepository::default()).unwrap();
+        assert!(fresh.submit_transaction(tampered).is_err());
+        assert_eq!(crate::consensus::signature_verifications(), before + 1);
+    }
+
+    #[test]
     fn address_usage_cache_is_invalidated_when_a_tip_drops_a_mempool_object() {
         let mut node = Node::open(MemoryRepository::default()).unwrap();
         let transaction = signed_genesis_transaction(&node);
