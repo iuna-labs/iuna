@@ -187,8 +187,6 @@
     .button.discord { border-color: rgba(88, 101, 242, .72); background: rgba(88, 101, 242, .2); color: #eef1ff; }
     .button.discord:hover { border-color: #8e99ff; background: rgba(88, 101, 242, .3); }
     .button-icon { width: 18px; height: 18px; flex: 0 0 auto; fill: currentColor; }
-    .text-link { color: var(--muted); font-size: 14px; font-weight: 700; }
-    .text-link:hover { color: var(--green); }
 
     /* Hero */
     .hero { padding: clamp(72px, 9vw, 120px) 0 clamp(48px, 6vw, 72px); }
@@ -228,7 +226,15 @@
     .lead { max-width: 600px; margin-bottom: 32px; color: #e3eaed; font-size: clamp(18px, 1.7vw, 21px); line-height: 1.55; }
     .hero .actions { gap: 12px 14px; }
 
-    /* Hero illustration: what $100 buys at every wealth level */
+    .hero-side { display: grid; gap: 16px; }
+    .how-card { border: 1px solid var(--line); border-radius: var(--radius-large); background: rgba(21, 25, 27, .5); }
+    .how-card-stage { position: relative; height: 170px; overflow: hidden; border-radius: var(--radius-large) var(--radius-large) 0 0; }
+    .chains.mini { position: absolute; left: 0; right: 0; top: 50%; translate: 0 -44%; --zoom: 1.25; }
+    .chains.mini .chains-miner, .chains.mini .chains-tickets, .chains.mini .chains-mempool { display: none; }
+    .how-card-foot { display: flex; justify-content: space-between; gap: 12px; align-items: center; border-top: 1px solid var(--line); padding: 12px 16px 12px 20px; background: rgba(21, 25, 27, .9); border-radius: 0 0 var(--radius-large) var(--radius-large); font-size: 14px; font-weight: 800; }
+    .how-card-foot .button { min-height: 38px; font-size: 13px; }
+
+    /* Hero illustration: how the same $100 is weighted for ordinary people versus large companies */
     .odds-card {
       border: 1px solid var(--line);
       border-radius: var(--radius-large);
@@ -247,10 +253,13 @@
     .mini-head svg { flex: 0 0 auto; width: 18px; height: 18px; }
     .mini-chart { display: block; width: 100%; height: auto; overflow: visible; }
     .mini-axis { fill: none; stroke: #526068; stroke-width: 1; }
-    .mini-guide { fill: none; stroke: var(--mini-color); stroke-width: 1; stroke-dasharray: 2 3; opacity: .45; }
-    .mini-area { fill: var(--mini-color); opacity: .08; }
+    .mini-area { fill: var(--mini-color); }
+    .mini-area.people { opacity: .32; }
+    .mini-area.firms { opacity: .12; }
+    .mini-split { fill: none; stroke: #526068; stroke-width: 1; stroke-dasharray: 2 3; }
+    .mini-who { fill: #8f9da4; }
+    .mini-who .win { fill: var(--bg); }
     .mini-line { fill: none; stroke: var(--mini-color); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
-    .mini-dot { fill: var(--mini-color); stroke: var(--bg); stroke-width: 2; }
     .mini-note { margin-top: 8px; color: var(--mini-color); font-size: 11px; font-weight: 850; letter-spacing: .04em; line-height: 1.35; text-transform: uppercase; }
     .minis-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px 16px; align-items: center; margin-top: 16px; border-top: 1px solid var(--line); padding-top: 16px; }
     .minis-axes { display: grid; gap: 2px; color: #8f9da4; font-size: 12px; font-weight: 700; }
@@ -693,6 +702,7 @@
     .footer a:hover { color: var(--green); }
 
     @media (max-width: 1020px) {
+      .how-card { display: none; }
       .nav { display: none; }
       .menu { display: block; }
       .roadmap { grid-template-columns: 1fr; gap: 0; }
@@ -779,51 +789,78 @@
         <div class="actions">
           <a class="button primary large" href="/downloads/">Download iuna</a>
           <a class="button discord large" href="https://discord.gg/wdk8cjkj2G" target="_blank" rel="noopener noreferrer"><svg class="button-icon" aria-hidden="true" focusable="false"><use href="#discord-icon"></use></svg><span>Join Discord</span></a>
-          <a class="text-link" href="#how">How it works</a>
         </div>
       </div>
+      <div class="hero-side">
       <aside class="odds-card" aria-labelledby="odds-title">
-        <h2 id="odds-title">What does $100 buy you?</h2>
+        <h2 id="odds-title">Who gets the better odds?</h2>
         <div class="minis">
           <figure class="mini pow" data-curve="pow">
             <div class="mini-head"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="10" fill="#f7931a"></circle><text x="10" y="14.4" text-anchor="middle" fill="#fff" font-size="13" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, sans-serif" transform="rotate(12 10 10)">₿</text></svg><span>Bitcoin</span></div>
-            <svg class="mini-chart" viewBox="0 0 120 88" role="img" aria-label="Bitcoin, Proof of Work: the chance stays low until someone can afford specialized ASICs at scale, then rises steeply with wealth.">
-              <path class="mini-area" d="M12.0 77.6 L15.4 77.5 L18.7 77.4 L21.8 77.2 L24.9 77.0 L27.8 76.8 L30.7 76.6 L33.5 76.3 L36.1 76.0 L38.7 75.7 L41.2 75.3 L43.7 74.9 L46.1 74.5 L48.4 74.0 L50.6 73.4 L52.8 72.9 L55.0 72.2 L57.1 71.6 L59.1 70.9 L61.2 70.1 L63.1 69.3 L64.8 68.5 L66.3 67.7 L67.9 66.7 L69.3 65.7 L70.7 64.6 L72.0 63.4 L73.3 62.2 L74.5 60.9 L75.7 59.5 L76.8 58.1 L77.9 56.6 L79.0 55.0 L79.9 53.4 L80.9 51.7 L81.8 50.0 L82.7 48.2 L83.5 46.4 L84.3 44.5 L85.0 42.6 L85.7 40.7 L86.6 38.5 L87.5 36.4 L88.5 34.4 L89.5 32.5 L90.6 30.6 L91.8 28.9 L93.1 27.3 L94.4 25.7 L95.7 24.3 L97.2 22.9 L98.7 21.6 L100.3 20.4 L102.0 19.3 L103.7 18.3 L105.6 17.4 L107.5 16.6 L109.5 15.9 L111.6 15.2 L113.7 14.7 L116.0 14.2 L116 82 L12 82 Z"></path>
+            <svg class="mini-chart" viewBox="0 0 120 100" role="img" aria-label="Bitcoin, Proof of Work: ordinary people get little of the chance; most of it sits with large companies that can afford specialized ASICs at scale.">
+              <defs><clipPath id="pow-people"><rect x="0" y="0" width="64" height="88"></rect></clipPath><clipPath id="pow-firms"><rect x="64" y="0" width="56" height="88"></rect></clipPath></defs><path class="mini-area people" clip-path="url(#pow-people)" d="M12.0 77.6 L15.4 77.5 L18.7 77.4 L21.8 77.2 L24.9 77.0 L27.8 76.8 L30.7 76.6 L33.5 76.3 L36.1 76.0 L38.7 75.7 L41.2 75.3 L43.7 74.9 L46.1 74.5 L48.4 74.0 L50.6 73.4 L52.8 72.9 L55.0 72.2 L57.1 71.6 L59.1 70.9 L61.2 70.1 L63.1 69.3 L64.8 68.5 L66.3 67.7 L67.9 66.7 L69.3 65.7 L70.7 64.6 L72.0 63.4 L73.3 62.2 L74.5 60.9 L75.7 59.5 L76.8 58.1 L77.9 56.6 L79.0 55.0 L79.9 53.4 L80.9 51.7 L81.8 50.0 L82.7 48.2 L83.5 46.4 L84.3 44.5 L85.0 42.6 L85.7 40.7 L86.6 38.5 L87.5 36.4 L88.5 34.4 L89.5 32.5 L90.6 30.6 L91.8 28.9 L93.1 27.3 L94.4 25.7 L95.7 24.3 L97.2 22.9 L98.7 21.6 L100.3 20.4 L102.0 19.3 L103.7 18.3 L105.6 17.4 L107.5 16.6 L109.5 15.9 L111.6 15.2 L113.7 14.7 L116.0 14.2 L116 82 L12 82 Z"></path><path class="mini-area firms" clip-path="url(#pow-firms)" d="M12.0 77.6 L15.4 77.5 L18.7 77.4 L21.8 77.2 L24.9 77.0 L27.8 76.8 L30.7 76.6 L33.5 76.3 L36.1 76.0 L38.7 75.7 L41.2 75.3 L43.7 74.9 L46.1 74.5 L48.4 74.0 L50.6 73.4 L52.8 72.9 L55.0 72.2 L57.1 71.6 L59.1 70.9 L61.2 70.1 L63.1 69.3 L64.8 68.5 L66.3 67.7 L67.9 66.7 L69.3 65.7 L70.7 64.6 L72.0 63.4 L73.3 62.2 L74.5 60.9 L75.7 59.5 L76.8 58.1 L77.9 56.6 L79.0 55.0 L79.9 53.4 L80.9 51.7 L81.8 50.0 L82.7 48.2 L83.5 46.4 L84.3 44.5 L85.0 42.6 L85.7 40.7 L86.6 38.5 L87.5 36.4 L88.5 34.4 L89.5 32.5 L90.6 30.6 L91.8 28.9 L93.1 27.3 L94.4 25.7 L95.7 24.3 L97.2 22.9 L98.7 21.6 L100.3 20.4 L102.0 19.3 L103.7 18.3 L105.6 17.4 L107.5 16.6 L109.5 15.9 L111.6 15.2 L113.7 14.7 L116.0 14.2 L116 82 L12 82 Z"></path>
               <path class="mini-axis" d="M12 6V82H118"></path>
               <path class="mini-line" d="M12.0 77.6 L15.4 77.5 L18.7 77.4 L21.8 77.2 L24.9 77.0 L27.8 76.8 L30.7 76.6 L33.5 76.3 L36.1 76.0 L38.7 75.7 L41.2 75.3 L43.7 74.9 L46.1 74.5 L48.4 74.0 L50.6 73.4 L52.8 72.9 L55.0 72.2 L57.1 71.6 L59.1 70.9 L61.2 70.1 L63.1 69.3 L64.8 68.5 L66.3 67.7 L67.9 66.7 L69.3 65.7 L70.7 64.6 L72.0 63.4 L73.3 62.2 L74.5 60.9 L75.7 59.5 L76.8 58.1 L77.9 56.6 L79.0 55.0 L79.9 53.4 L80.9 51.7 L81.8 50.0 L82.7 48.2 L83.5 46.4 L84.3 44.5 L85.0 42.6 L85.7 40.7 L86.6 38.5 L87.5 36.4 L88.5 34.4 L89.5 32.5 L90.6 30.6 L91.8 28.9 L93.1 27.3 L94.4 25.7 L95.7 24.3 L97.2 22.9 L98.7 21.6 L100.3 20.4 L102.0 19.3 L103.7 18.3 L105.6 17.4 L107.5 16.6 L109.5 15.9 L111.6 15.2 L113.7 14.7 L116.0 14.2"></path>
-              <path class="mini-guide" d=""></path>
-              <circle class="mini-dot" r="4.5" cx="-20" cy="-20"></circle>
+                            <path class="mini-split" d="M64 6V82"></path><g class="mini-who" transform="translate(32 87)"><circle cx="6" cy="3" r="2.6"></circle><path d="M1 12c0-3.3 2.2-5.4 5-5.4s5 2.1 5 5.4Z"></path></g><g class="mini-who" transform="translate(84 87)"><path d="M1 12V1h7v11ZM8.6 12V5H12v7Z"></path><path class="win" d="M2.6 3h1.4v1.4H2.6ZM5 3h1.4v1.4H5ZM2.6 6h1.4v1.4H2.6ZM5 6h1.4v1.4H5ZM2.6 9h1.4v1.4H2.6ZM5 9h1.4v1.4H5Z"></path></g>
             </svg>
-            <figcaption class="mini-note">Better ASICs, better odds</figcaption>
+            <figcaption class="mini-note">ASIC farms take the most</figcaption>
           </figure>
           <figure class="mini pos" data-curve="pos">
             <div class="mini-head"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 1 4.5 10.2 10 13.4 15.5 10.2Z" fill="#c4c9f5"></path><path d="M10 1v12.4l5.5-3.2Z" fill="#8a92e8"></path><path d="M4.5 11.3 10 19l5.5-7.7-5.5 3.2Z" fill="#c4c9f5"></path><path d="M10 14.5V19l5.5-7.7Z" fill="#8a92e8"></path></svg><span>Ethereum</span></div>
-            <svg class="mini-chart" viewBox="0 0 120 88" role="img" aria-label="Ethereum, Proof of Stake: the chance rises in step with the stake someone already holds.">
-              <path class="mini-area" d="M12.0 78.5 L14.6 76.9 L17.2 75.3 L19.8 73.8 L22.4 72.2 L25.0 70.6 L27.6 69.0 L30.2 67.5 L32.8 65.9 L35.4 64.3 L38.0 62.8 L40.6 61.2 L43.2 59.6 L45.8 58.0 L48.4 56.5 L51.0 54.9 L53.6 53.3 L56.2 51.7 L58.8 50.1 L61.4 48.6 L64.0 47.0 L66.6 45.4 L69.2 43.8 L71.8 42.3 L74.4 40.7 L77.0 39.1 L79.6 37.5 L82.2 36.0 L84.8 34.4 L87.4 32.8 L90.0 31.2 L92.6 29.7 L95.2 28.1 L97.8 26.5 L100.4 24.9 L103.0 23.4 L105.6 21.8 L108.2 20.2 L110.8 18.6 L113.4 17.1 L116.0 15.5 L116 82 L12 82 Z"></path>
+            <svg class="mini-chart" viewBox="0 0 120 100" role="img" aria-label="Ethereum, Proof of Stake: the chance rises with the stake already held, so large holders get most of it.">
+              <defs><clipPath id="pos-people"><rect x="0" y="0" width="64" height="88"></rect></clipPath><clipPath id="pos-firms"><rect x="64" y="0" width="56" height="88"></rect></clipPath></defs><path class="mini-area people" clip-path="url(#pos-people)" d="M12.0 78.5 L14.6 76.9 L17.2 75.3 L19.8 73.8 L22.4 72.2 L25.0 70.6 L27.6 69.0 L30.2 67.5 L32.8 65.9 L35.4 64.3 L38.0 62.8 L40.6 61.2 L43.2 59.6 L45.8 58.0 L48.4 56.5 L51.0 54.9 L53.6 53.3 L56.2 51.7 L58.8 50.1 L61.4 48.6 L64.0 47.0 L66.6 45.4 L69.2 43.8 L71.8 42.3 L74.4 40.7 L77.0 39.1 L79.6 37.5 L82.2 36.0 L84.8 34.4 L87.4 32.8 L90.0 31.2 L92.6 29.7 L95.2 28.1 L97.8 26.5 L100.4 24.9 L103.0 23.4 L105.6 21.8 L108.2 20.2 L110.8 18.6 L113.4 17.1 L116.0 15.5 L116 82 L12 82 Z"></path><path class="mini-area firms" clip-path="url(#pos-firms)" d="M12.0 78.5 L14.6 76.9 L17.2 75.3 L19.8 73.8 L22.4 72.2 L25.0 70.6 L27.6 69.0 L30.2 67.5 L32.8 65.9 L35.4 64.3 L38.0 62.8 L40.6 61.2 L43.2 59.6 L45.8 58.0 L48.4 56.5 L51.0 54.9 L53.6 53.3 L56.2 51.7 L58.8 50.1 L61.4 48.6 L64.0 47.0 L66.6 45.4 L69.2 43.8 L71.8 42.3 L74.4 40.7 L77.0 39.1 L79.6 37.5 L82.2 36.0 L84.8 34.4 L87.4 32.8 L90.0 31.2 L92.6 29.7 L95.2 28.1 L97.8 26.5 L100.4 24.9 L103.0 23.4 L105.6 21.8 L108.2 20.2 L110.8 18.6 L113.4 17.1 L116.0 15.5 L116 82 L12 82 Z"></path>
               <path class="mini-axis" d="M12 6V82H118"></path>
               <path class="mini-line" d="M12.0 78.5 L14.6 76.9 L17.2 75.3 L19.8 73.8 L22.4 72.2 L25.0 70.6 L27.6 69.0 L30.2 67.5 L32.8 65.9 L35.4 64.3 L38.0 62.8 L40.6 61.2 L43.2 59.6 L45.8 58.0 L48.4 56.5 L51.0 54.9 L53.6 53.3 L56.2 51.7 L58.8 50.1 L61.4 48.6 L64.0 47.0 L66.6 45.4 L69.2 43.8 L71.8 42.3 L74.4 40.7 L77.0 39.1 L79.6 37.5 L82.2 36.0 L84.8 34.4 L87.4 32.8 L90.0 31.2 L92.6 29.7 L95.2 28.1 L97.8 26.5 L100.4 24.9 L103.0 23.4 L105.6 21.8 L108.2 20.2 L110.8 18.6 L113.4 17.1 L116.0 15.5"></path>
-              <path class="mini-guide" d=""></path>
-              <circle class="mini-dot" r="4.5" cx="-20" cy="-20"></circle>
+                            <path class="mini-split" d="M64 6V82"></path><g class="mini-who" transform="translate(32 87)"><circle cx="6" cy="3" r="2.6"></circle><path d="M1 12c0-3.3 2.2-5.4 5-5.4s5 2.1 5 5.4Z"></path></g><g class="mini-who" transform="translate(84 87)"><path d="M1 12V1h7v11ZM8.6 12V5H12v7Z"></path><path class="win" d="M2.6 3h1.4v1.4H2.6ZM5 3h1.4v1.4H5ZM2.6 6h1.4v1.4H2.6ZM5 6h1.4v1.4H5ZM2.6 9h1.4v1.4H2.6ZM5 9h1.4v1.4H5Z"></path></g>
             </svg>
-            <figcaption class="mini-note">More stake, better odds</figcaption>
+            <figcaption class="mini-note">Big holders take the most</figcaption>
           </figure>
           <figure class="mini poe" data-curve="poe">
             <div class="mini-head"><svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="9.4" cy="7.6" r="2.8" fill="var(--green)"></circle><path d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13" fill="none" stroke="var(--green)" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"></path></svg><span>iuna</span></div>
-            <svg class="mini-chart" viewBox="0 0 120 88" role="img" aria-label="iuna, Proof of Expenditure: the chance stays level, because only the $100 spent counts, not what someone already owns.">
-              <path class="mini-area" d="M12.0 52.6 L14.6 52.6 L17.2 52.6 L19.8 52.6 L22.4 52.6 L25.0 52.6 L27.6 52.6 L30.2 52.6 L32.8 52.6 L35.4 52.6 L38.0 52.6 L40.6 52.6 L43.2 52.6 L45.8 52.6 L48.4 52.6 L51.0 52.6 L53.6 52.6 L56.2 52.6 L58.8 52.6 L61.4 52.6 L64.0 52.6 L66.6 52.6 L69.2 52.6 L71.8 52.6 L74.4 52.6 L77.0 52.6 L79.6 52.6 L82.2 52.6 L84.8 52.6 L87.4 52.6 L90.0 52.6 L92.6 52.6 L95.2 52.6 L97.8 52.6 L100.4 52.6 L103.0 52.6 L105.6 52.6 L108.2 52.6 L110.8 52.6 L113.4 52.6 L116.0 52.6 L116 82 L12 82 Z"></path>
+            <svg class="mini-chart" viewBox="0 0 120 100" role="img" aria-label="iuna, Proof of Expenditure: the chance is the same for ordinary people and large companies, because only what is spent counts, not what someone already owns.">
+              <defs><clipPath id="poe-people"><rect x="0" y="0" width="64" height="88"></rect></clipPath><clipPath id="poe-firms"><rect x="64" y="0" width="56" height="88"></rect></clipPath></defs><path class="mini-area people" clip-path="url(#poe-people)" d="M12.0 52.6 L14.6 52.6 L17.2 52.6 L19.8 52.6 L22.4 52.6 L25.0 52.6 L27.6 52.6 L30.2 52.6 L32.8 52.6 L35.4 52.6 L38.0 52.6 L40.6 52.6 L43.2 52.6 L45.8 52.6 L48.4 52.6 L51.0 52.6 L53.6 52.6 L56.2 52.6 L58.8 52.6 L61.4 52.6 L64.0 52.6 L66.6 52.6 L69.2 52.6 L71.8 52.6 L74.4 52.6 L77.0 52.6 L79.6 52.6 L82.2 52.6 L84.8 52.6 L87.4 52.6 L90.0 52.6 L92.6 52.6 L95.2 52.6 L97.8 52.6 L100.4 52.6 L103.0 52.6 L105.6 52.6 L108.2 52.6 L110.8 52.6 L113.4 52.6 L116.0 52.6 L116 82 L12 82 Z"></path><path class="mini-area firms" clip-path="url(#poe-firms)" d="M12.0 52.6 L14.6 52.6 L17.2 52.6 L19.8 52.6 L22.4 52.6 L25.0 52.6 L27.6 52.6 L30.2 52.6 L32.8 52.6 L35.4 52.6 L38.0 52.6 L40.6 52.6 L43.2 52.6 L45.8 52.6 L48.4 52.6 L51.0 52.6 L53.6 52.6 L56.2 52.6 L58.8 52.6 L61.4 52.6 L64.0 52.6 L66.6 52.6 L69.2 52.6 L71.8 52.6 L74.4 52.6 L77.0 52.6 L79.6 52.6 L82.2 52.6 L84.8 52.6 L87.4 52.6 L90.0 52.6 L92.6 52.6 L95.2 52.6 L97.8 52.6 L100.4 52.6 L103.0 52.6 L105.6 52.6 L108.2 52.6 L110.8 52.6 L113.4 52.6 L116.0 52.6 L116 82 L12 82 Z"></path>
               <path class="mini-axis" d="M12 6V82H118"></path>
               <path class="mini-line" d="M12.0 52.6 L14.6 52.6 L17.2 52.6 L19.8 52.6 L22.4 52.6 L25.0 52.6 L27.6 52.6 L30.2 52.6 L32.8 52.6 L35.4 52.6 L38.0 52.6 L40.6 52.6 L43.2 52.6 L45.8 52.6 L48.4 52.6 L51.0 52.6 L53.6 52.6 L56.2 52.6 L58.8 52.6 L61.4 52.6 L64.0 52.6 L66.6 52.6 L69.2 52.6 L71.8 52.6 L74.4 52.6 L77.0 52.6 L79.6 52.6 L82.2 52.6 L84.8 52.6 L87.4 52.6 L90.0 52.6 L92.6 52.6 L95.2 52.6 L97.8 52.6 L100.4 52.6 L103.0 52.6 L105.6 52.6 L108.2 52.6 L110.8 52.6 L113.4 52.6 L116.0 52.6"></path>
-              <path class="mini-guide" d=""></path>
-              <circle class="mini-dot" r="4.5" cx="-20" cy="-20"></circle>
+                            <path class="mini-split" d="M64 6V82"></path><g class="mini-who" transform="translate(32 87)"><circle cx="6" cy="3" r="2.6"></circle><path d="M1 12c0-3.3 2.2-5.4 5-5.4s5 2.1 5 5.4Z"></path></g><g class="mini-who" transform="translate(84 87)"><path d="M1 12V1h7v11ZM8.6 12V5H12v7Z"></path><path class="win" d="M2.6 3h1.4v1.4H2.6ZM5 3h1.4v1.4H5ZM2.6 6h1.4v1.4H2.6ZM5 6h1.4v1.4H5ZM2.6 9h1.4v1.4H2.6ZM5 9h1.4v1.4H5Z"></path></g>
             </svg>
-            <figcaption class="mini-note">Same spend, same odds</figcaption>
+            <figcaption class="mini-note">Same odds for everyone</figcaption>
           </figure>
         </div>
         <div class="minis-foot">
-          <div class="minis-axes" aria-hidden="true"><span>↑ Chance per block</span><span>→ Wealth already owned</span></div>
+          <div class="minis-axes" aria-hidden="true"><span>↑ Chance per block for the same $100</span><span>→ Wealth already owned: people to companies</span></div>
           <a class="button" href="#why">Why this matters</a>
         </div>
       </aside>
+      <aside class="how-card" aria-label="How it works">
+        <div class="how-card-stage">
+        <div class="chains mini" aria-hidden="true">
+          <div class="chains-stage">
+            <div class="chains-world">
+              <div class="chains-floor"></div>
+              <div class="chains-miner">
+                <div class="card"><span class="pill">Node</span><span class="miner-pool-label">Mempool</span><span class="miner-pool"></span><strong>Heartbeat miner</strong><code data-hash>3f9a1c07e2b4</code><span class="nonce">nonce <span data-nonce>0</span></span></div>
+              </div>
+              <div class="chains-mempool">
+                <div class="pool"><span class="pool-label">Mempool</span><div class="pool-box"></div></div>
+              </div>
+              <div class="chains-tickets">
+                <div class="stack"><span class="node-frame"><span>Node</span></span><span class="ticket"></span><span class="ticket"></span><span class="ticket"></span><span class="stack-label">Tickets</span><span class="send"></span></div>
+              </div>
+              <div class="chains-run">
+                <div class="chains-level hb"></div>
+                <div class="chains-anchors"></div>
+                <div class="chains-level lg"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        </div>
+        <div class="how-card-foot">
+          <span>Two chains, one shared state</span>
+          <a class="button primary" href="#how">How it works</a>
+        </div>
+      </aside>
+      </div>
     </div>
   </header>
 
@@ -1061,52 +1098,9 @@
   </aside>
 
   <script>
-    // Hero charts: a dot slides along each curve in step, so the three systems can be compared at
-    // the same wealth. Heights are read from the drawn polyline, so dot and line always agree.
-    (function () {
-      var card = document.querySelector(".odds-card");
-      if (!card) return;
-      var minis = Array.prototype.map.call(card.querySelectorAll("[data-curve]"), function (el) {
-        var nums = el.querySelector(".mini-line").getAttribute("d").match(/-?[0-9.]+/g).map(Number);
-        var points = [];
-        for (var i = 0; i < nums.length; i += 2) points.push([nums[i], nums[i + 1]]);
-        return { points: points, dot: el.querySelector(".mini-dot"), guide: el.querySelector(".mini-guide") };
-      });
-      var heightAt = function (points, x) {
-        for (var i = 1; i < points.length; i++) {
-          var a = points[i - 1], b = points[i];
-          if (x <= b[0]) return a[1] + (b[1] - a[1]) * ((x - a[0]) / (b[0] - a[0] || 1));
-        }
-        return points[points.length - 1][1];
-      };
-      var place = function (u) {
-        minis.forEach(function (m) {
-          var first = m.points[0], last = m.points[m.points.length - 1];
-          var x = first[0] + (last[0] - first[0]) * u, y = heightAt(m.points, x), base = 82;
-          m.dot.setAttribute("cx", x.toFixed(2));
-          m.dot.setAttribute("cy", y.toFixed(2));
-          m.guide.setAttribute("d", "M" + first[0] + " " + y.toFixed(2) + "H" + x.toFixed(2) + "V" + base);
-        });
-      };
-      if (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) { place(.8); return; }
-      var visible = true, start = null, PERIOD = 9000;
-      if ("IntersectionObserver" in window) {
-        new IntersectionObserver(function (entries) { visible = entries[0].isIntersecting; }).observe(card);
-      }
-      var frame = function (now) {
-        if (start === null) start = now;
-        if (visible && !document.hidden) place(.04 + .94 * (.5 - .5 * Math.cos(2 * Math.PI * (now - start) / PERIOD)));
-        requestAnimationFrame(frame);
-      };
-      place(.04);
-      requestAnimationFrame(frame);
-    })();
-
     // How it works: grow both chains at the head. Every Heartbeat the chain steps back, a new block
     // is mined in and the tickets pay it; every tenth Heartbeat the lottery adds a Ledger block.
-    (function () {
-      var chains = document.querySelector(".chains");
-      if (!chains) return;
+    Array.prototype.forEach.call(document.querySelectorAll(".chains"), function (chains) {
       var run = chains.querySelector(".chains-run");
       var hbLevel = chains.querySelector(".chains-level.hb");
       var lgLevel = chains.querySelector(".chains-level.lg");
@@ -1268,17 +1262,16 @@
         prune();
       };
       setInterval(tick, BEAT);
-    })();
+    });
 
-    // How it works: scale the fixed-size 3D stage down to the available width.
-    (function () {
-      var chains = document.querySelector(".chains");
-      if (!chains) return;
+    // How it works: scale the fixed-size 3D stage down to the available width; the hero copy zooms in.
+    Array.prototype.forEach.call(document.querySelectorAll(".chains"), function (chains) {
       var fit = function () {
-        var stage = parseFloat(getComputedStyle(chains).getPropertyValue("--stage-w")) || 1100;
-        chains.style.setProperty("--s", Math.min(1, chains.clientWidth / stage).toFixed(4));
+        var style = getComputedStyle(chains);
+        var stage = parseFloat(style.getPropertyValue("--stage-w")) || 1100, zoom = parseFloat(style.getPropertyValue("--zoom")) || 1;
+        chains.style.setProperty("--s", Math.min(1, chains.clientWidth / stage * zoom).toFixed(4));
         // Right-align the protocol button with the Heartbeat label, when that label is shown.
-        var label = chains.querySelector(".chains-label.hb"), foot = document.querySelector(".chains-foot");
+        var label = chains.querySelector(".chains-label.hb"), foot = chains.parentNode.querySelector(".chains-foot");
         if (foot) {
           foot.style.right = "";
           if (label && label.offsetParent) {
@@ -1289,7 +1282,7 @@
       fit();
       if ("ResizeObserver" in window) new ResizeObserver(fit).observe(chains);
       else window.addEventListener("resize", fit);
-    })();
+    });
 
     // Live network figures from the public stats endpoint. The strip keeps its dashes when the
     // node cannot be reached; the rest of the page does not depend on it.
