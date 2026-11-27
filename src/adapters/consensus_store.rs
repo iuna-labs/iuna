@@ -48,8 +48,11 @@ CREATE TABLE IF NOT EXISTS consensus_chain_checkpoints (
 
 // JSON has field names and decimal numbers in addition to canonical bytes. This is a defensive
 // decoding limit, not a consensus block-size limit; canonical limits are checked during replay.
+// It must still hold every consensus-valid block, or a mined block could not be persisted: a byte
+// can take four characters ("255,") and field names add more, so the densest blocks need about
+// 4.5 times their canonical size (see `the_densest_valid_blocks_fit_the_storage_decoding_limit`).
 const MAX_STORED_BLOCK_JSON_BYTES: usize =
-    4 * (MAX_HEARTBEAT_BLOCK_BYTES + MAX_LEDGER_SIDECAR_BYTES);
+    6 * (MAX_HEARTBEAT_BLOCK_BYTES + MAX_LEDGER_SIDECAR_BYTES);
 
 #[derive(Clone, Debug)]
 pub struct ConsensusChainStore {
@@ -797,5 +800,142 @@ BEGIN SELECT RAISE(FAIL, 'stored chain prefix was deleted'); END;
             .query_row("SELECT value FROM ui_marker", [], |row| row.get(0))
             .unwrap();
         assert_eq!(marker, 7);
+    }
+
+    /// The densest blocks consensus allows: every byte 0xFF (the longest JSON number) and as many
+    /// of the smallest repeated items as the canonical limits hold. If one of these could not be
+    /// stored, a valid block would be refused after it was mined and the chain would stall.
+    fn densest_blocks() -> Vec<HeartbeatBlock> {
+        use crate::consensus::{
+            CandidateHeader, HeartbeatHeader, Input, Sidecar, TicketInput, TicketTransaction,
+            Transaction as LedgerTransaction,
+        };
+
+        let outpoint = OutPoint {
+            transaction_id: [0xff; 32],
+            output_index: u32::MAX,
+        };
+        let output = Output {
+            owner: [0xff; 32],
+            value: u64::MAX,
+        };
+        let input = Input {
+            previous_output: outpoint.clone(),
+            public_key: [0xff; 32],
+            signature: vec![0xff; 64],
+        };
+        let ticket_input = TicketInput {
+            previous_output: outpoint,
+            public_key: [0xff; 32],
+            signature: vec![0xff; 64],
+        };
+        let ticket = TicketTransaction {
+            version: u16::MAX,
+            inputs: vec![ticket_input.clone()],
+            budget: u64::MAX,
+            duration: u64::MAX,
+            mining_public_key: [0xff; 32],
+            lottery_seed: [0xff; 32],
+            change: Some(output.clone()),
+        };
+        let header = HeartbeatHeader {
+            protocol_version: u16::MAX,
+            network: NETWORK_ID.to_string(),
+            height: u64::MAX,
+            parent: Some([0xff; 32]),
+            timestamp: u64::MAX,
+            target: [0xff; 32],
+            nonce: u64::MAX,
+            miner_public_key: [0xff; 32],
+            tickets_root: [0xff; 32],
+            candidate_hash: Some([0xff; 32]),
+            post_state_root: [0xff; 32],
+            payout_commitment: [0xff; 32],
+        };
+        let candidate_header = CandidateHeader {
+            version: u16::MAX,
+            lottery_heartbeat: [0xff; 32],
+            lottery_height: u64::MAX,
+            parent_anchor: [0xff; 32],
+            ticket_id: [0xff; 32],
+            slot: u64::MAX,
+            lottery_output: [0xff; 32],
+            transactions_root: [0xff; 32],
+            signature: vec![0xff; 64],
+        };
+        let transaction = |inputs: usize, outputs: usize| LedgerTransaction {
+            version: u16::MAX,
+            inputs: vec![input.clone(); inputs],
+            outputs: vec![output.clone(); outputs],
+        };
+        let sidecar = |transactions: Vec<LedgerTransaction>| Sidecar {
+            header: candidate_header.clone(),
+            transactions,
+        };
+        // How many items fit when one item costs `size(1) - size(0)` canonical bytes.
+        let fill = |limit: usize, size: &dyn Fn(usize) -> usize| {
+            let count = (limit - size(0)) / (size(1) - size(0));
+            assert!(size(count) <= limit && size(count + 1) > limit);
+            count
+        };
+
+        let block = |tickets: Vec<TicketTransaction>, sidecar: Sidecar| HeartbeatBlock {
+            header: header.clone(),
+            tickets,
+            sidecar: Some(sidecar),
+        };
+        let one_ticket = |inputs: usize| {
+            let mut ticket = ticket.clone();
+            ticket.inputs = vec![ticket_input.clone(); inputs];
+            ticket
+        };
+        let ticket_inputs = fill(MAX_HEARTBEAT_BLOCK_BYTES, &|count| {
+            block(vec![one_ticket(count)], sidecar(Vec::new())).canonical_size()
+        });
+        let tickets = fill(MAX_HEARTBEAT_BLOCK_BYTES, &|count| {
+            block(vec![ticket.clone(); count], sidecar(Vec::new())).canonical_size()
+        });
+        let ledger_inputs = fill(MAX_LEDGER_SIDECAR_BYTES, &|count| {
+            sidecar(vec![transaction(count, 0)]).canonical_size()
+        });
+        let ledger_outputs = fill(MAX_LEDGER_SIDECAR_BYTES, &|count| {
+            sidecar(vec![transaction(0, count)]).canonical_size()
+        });
+        let ledger_transactions = fill(MAX_LEDGER_SIDECAR_BYTES, &|count| {
+            sidecar(vec![transaction(1, 1); count]).canonical_size()
+        });
+        let empty_transactions = fill(MAX_LEDGER_SIDECAR_BYTES, &|count| {
+            sidecar(vec![transaction(0, 0); count]).canonical_size()
+        });
+
+        let ticket_sets = [vec![one_ticket(ticket_inputs)], vec![ticket; tickets]];
+        let sidecars = [
+            sidecar(vec![transaction(ledger_inputs, 0)]),
+            sidecar(vec![transaction(0, ledger_outputs)]),
+            sidecar(vec![transaction(1, 1); ledger_transactions]),
+            sidecar(vec![transaction(0, 0); empty_transactions]),
+        ];
+        ticket_sets
+            .iter()
+            .flat_map(|tickets| {
+                sidecars
+                    .iter()
+                    .map(|sidecar| block(tickets.clone(), sidecar.clone()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_densest_valid_blocks_fit_the_storage_decoding_limit() {
+        for block in densest_blocks() {
+            let json = serde_json::to_vec(&block).unwrap();
+            assert!(
+                json.len() <= MAX_STORED_BLOCK_JSON_BYTES,
+                "{} JSON bytes",
+                json.len()
+            );
+            let decoded: HeartbeatBlock = serde_json::from_slice(&json).unwrap();
+            assert_eq!(decoded, block);
+        }
     }
 }
