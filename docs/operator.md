@@ -30,6 +30,11 @@ storage.
   API on a separate listener. It is disabled when this option is absent and its
   port must differ from the operator and P2P listeners.
 
+The public wallet listener keeps at most `256` connections open and the operator listener at most
+`128`; connections over the cap are closed at once. A connection that sends or receives nothing
+for `60` seconds is closed. At startup the node raises its open-file limit to the hard limit (at
+most `10240`), so these caps leave room for P2P sessions and the chain database.
+
 The wallet password and operator token are separate credentials. On the default
 loopback listener, management is available without a token and rejects
 cross-origin browser requests. `POST /api/wallet` creates, restores, or unlocks

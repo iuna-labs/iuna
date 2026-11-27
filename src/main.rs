@@ -25,6 +25,10 @@ use iuna::{
         consensus_store::ConsensusChainStore,
         consensus_ui_store::ConsensusUiStore,
         consensus_wallet_store,
+        http_listener::{
+            AdmittedListener, MAX_OPERATOR_HTTP_CONNECTIONS, MAX_PUBLIC_HTTP_CONNECTIONS,
+            raise_open_file_limit,
+        },
     },
     app::{
         consensus_node::Node,
@@ -89,6 +93,7 @@ async fn main() -> Result<()> {
         print_help();
         return Ok(());
     };
+    raise_open_file_limit();
     std::fs::create_dir_all(&options.data_dir)
         .with_context(|| format!("creating data directory {}", options.data_dir.display()))?;
     let _data_dir_lock = lock_data_dir(&options.data_dir)?;
@@ -346,12 +351,19 @@ async fn main() -> Result<()> {
         p2p_advertisement,
     };
     let application = operator_router(http_state.clone(), options.http_addr, &options.http_hosts);
-    let server = axum::serve(http_listener, application).with_graceful_shutdown(shutdown_signal());
+    let server = axum::serve(
+        AdmittedListener::new(http_listener, MAX_OPERATOR_HTTP_CONNECTIONS),
+        application,
+    )
+    .with_graceful_shutdown(shutdown_signal());
     let wallet_server = async move {
         match wallet_listener {
-            Some(listener) => axum::serve(listener, public_wallet_router(http_state))
-                .await
-                .context("serving public wallet API"),
+            Some(listener) => axum::serve(
+                AdmittedListener::new(listener, MAX_PUBLIC_HTTP_CONNECTIONS),
+                public_wallet_router(http_state),
+            )
+            .await
+            .context("serving public wallet API"),
             None => std::future::pending::<Result<()>>().await,
         }
     };

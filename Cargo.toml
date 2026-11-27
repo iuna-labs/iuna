@@ -21,6 +21,9 @@ sha2 = "0.10.9"
 rusqlite = { version = "0.41.1", features = ["bundled", "fallible_uint"] }
 tokio = { version = "1.45.1", features = ["full"] }
 secrecy = { version = "0.10.3", default-features = false, features = ["serde"] }
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+
 [features]
 default = []
 # Test-only network parameters used by the ignored live TCP integration test.

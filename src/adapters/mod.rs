@@ -7,3 +7,4 @@ pub mod consensus_peer;
 pub mod consensus_store;
 pub mod consensus_ui_store;
 pub mod consensus_wallet_store;
+pub mod http_listener;
